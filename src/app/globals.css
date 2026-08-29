@@ -1,0 +1,44 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+html {
+  /* iOS 横屏/系统字号放大时禁止整页文字缩放 */
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  /* 中文回退:各平台系统字体优先,Geist 覆盖拉丁字符 */
+  font-family:
+    var(--font-sans),
+    "PingFang SC",
+    "HarmonyOS Sans SC",
+    "Microsoft YaHei",
+    system-ui,
+    sans-serif;
+  /* 长英文 token(模型名/URL)在窄屏内断行,不溢出视口 */
+  overflow-wrap: break-word;
+  /* 去掉 iOS 点击灰色高亮 */
+  -webkit-tap-highlight-color: transparent;
+  /* 字幕区内部滚动,整页不做橡皮筋回弹 */
+  overscroll-behavior-y: none;
+}
