@@ -12,7 +12,7 @@ import { NewConversationButton } from "@/components/chat/new-conversation-button
 import { isDatabaseConfigured } from "@/lib/db/client";
 import { deleteConversationAction } from "@/lib/memory/actions";
 import { listConversations } from "@/lib/memory/conversations";
-import { findPreset } from "@/lib/persona/presets";
+import { listPersonas } from "@/lib/persona/repository";
 
 export const dynamic = "force-dynamic";
 
@@ -27,10 +27,17 @@ function formatWhen(createdAt: Date): string {
   return createdAt.toLocaleDateString("zh-CN");
 }
 
+/** step1 遗留值:本地自定义文案时期存的人格 id。 */
+const LEGACY_CUSTOM_ID = "custom";
+
 export default async function Home() {
   const persistence = isDatabaseConfigured();
   // 未配置 DATABASE_URL 时不查库,页面仍可用(对话功能正常,只是不落库)
   const conversations = persistence ? await listConversations() : [];
+  // 人格名用于历史列表的副标题;预设在无库时也能查到(repository 会走常量降级)
+  const personaNames = new Map(
+    (await listPersonas()).map((persona) => [persona.id, persona.name] as const),
+  );
 
   return (
     <div className="text-foreground mx-auto w-full max-w-xl px-5 py-10 sm:py-16 md:max-w-2xl">
@@ -41,6 +48,18 @@ export default async function Home() {
       </p>
 
       <NewConversationButton />
+
+      <p className="mt-3 text-sm leading-6">
+        <Link href="/persona" className="text-zinc-500 underline underline-offset-4 hover:text-zinc-800 dark:hover:text-zinc-200">
+          人格库
+        </Link>
+        <span className="text-zinc-400"> · 调教 TA 的性格</span>
+        <span className="text-zinc-300 dark:text-zinc-700"> ｜ </span>
+        <Link href="/memory" className="text-zinc-500 underline underline-offset-4 hover:text-zinc-800 dark:hover:text-zinc-200">
+          TA 记得你
+        </Link>
+        <span className="text-zinc-400"> · 查看与删除记忆</span>
+      </p>
 
       {!persistence ? (
         <p className="mt-6 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-400">
@@ -62,12 +81,17 @@ export default async function Home() {
         ) : (
           <ul className="mt-2 overflow-hidden rounded-xl border border-black/[.06] dark:border-white/[.08]">
             {conversations.map((conversation) => {
-              const preset =
-                conversation.persona === null ? null : findPreset(conversation.persona);
+              // conversations.persona 存的是当时的 personaId(预设 archetype 或 uuid);
+              // 人格若已被删除,名字查不到就直接不显示,不显示为"未选择"
+              const personaName =
+                conversation.persona === null
+                  ? null
+                  : (personaNames.get(conversation.persona) ??
+                    (conversation.persona === LEGACY_CUSTOM_ID ? "自定义" : null));
               const subtitle = [
                 formatWhen(conversation.createdAt),
                 `${conversation.messageCount} 条`,
-                preset?.name ?? (conversation.persona === "custom" ? "自定义" : null),
+                personaName,
               ]
                 .filter((part) => part !== null)
                 .join(" · ");

@@ -23,17 +23,22 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ElfAvatar, type ElfAvatarState } from "@/components/chat/elf-avatar";
+import { MessageFeedback } from "@/components/chat/message-feedback";
 import { SettingsSheet, SettingsTrigger } from "@/components/chat/settings-sheet";
 import {
   appendMessagesAction,
   finishConversationAction,
+  rememberFactAction,
   switchConversationAction,
 } from "@/lib/memory/actions";
+import { renderPersonaInstructions } from "@/lib/persona/render";
+import { resolvePersona } from "@/lib/persona/resolve";
+import type { PersonaRecord } from "@/lib/persona/types";
 import type { PersonaSettings } from "@/lib/persona/settings";
-import { CUSTOM_PERSONA_ID, findPreset, resolveInstructions } from "@/lib/persona/presets";
+import { CUSTOM_PERSONA_ID } from "@/lib/persona/presets";
 import { usePersonaSettings } from "@/lib/persona/use-settings";
 import type { ElfMood } from "@/lib/realtime/mood";
-import type { RealtimeSessionDefaults } from "@/lib/realtime/session-defaults";
+import { REMEMBER_FACT_USAGE_HINT, type RealtimeSessionDefaults } from "@/lib/realtime/session-defaults";
 import {
   useRealtimeSession,
   type RealtimeStatus,
@@ -122,6 +127,7 @@ export function ChatPanel({
   memoryContext,
   persistence,
   initialMessages,
+  personas,
 }: {
   conversationId: string;
   sessionDefaults: RealtimeSessionDefaults;
@@ -131,18 +137,49 @@ export function ChatPanel({
   persistence: boolean;
   /** 进入已有会话时从数据库读出的历史转写(按时间正序) */
   initialMessages: readonly SeedTranscriptEntry[];
+  /** 可用人格(预设 + 该用户自建);由服务端一次性下发,供客户端渲染 instructions */
+  personas: readonly PersonaRecord[];
 }) {
   const { settings, update } = usePersonaSettings();
-  const personaInstructions = resolveInstructions(settings.personaId, settings.customInstructions);
-  // 记忆上下文拼在人格之后:人格定调,记忆补充事实
-  const instructions =
-    memoryContext === "" ? personaInstructions : `${personaInstructions}\n\n${memoryContext}`;
+  // 人格 → instructions 的渲染在客户端完成:instructions 随 session.update 下发,
+  // 而人格库由服务端一次性下发过来。渲染器与编辑器预览共用 render.ts。
+  const personaInstructions = renderPersonaInstructions(resolvePersona(settings, personas));
+  // 顺序:人格定调 → 工具使用说明 → 记忆补充事实。
+  // 工具说明只在确实注册了工具时才拼(见 useRealtimeSession:没传 onRememberFact 就不注册)。
+  const instructions = [personaInstructions, REMEMBER_FACT_USAGE_HINT, memoryContext]
+    .filter((part) => part !== "")
+    .join("\n\n");
+  /**
+   * 会话中实时记忆标记(step3 T2)。
+   *
+   * 回调要稳定(onRememberFact 会被写进 hook 内部的 ref,但引用变化会
+   * 让 useCallback 的依赖变化)。用 ref 持有 conversationId,使回调本身
+   * 只依赖 conversationId 这一个值。
+   */
+  const conversationIdRef = useRef(conversationId);
+  useEffect(() => {
+    conversationIdRef.current = conversationId;
+  });
+  const handleRememberFact = useCallback(
+    (fact: { content: string; category: string; importance: number }) => {
+      void rememberFactAction({
+        ...fact,
+        // 无持久化时 conversationId 是占位会话 id,传 null 让它不写外键
+        conversationId: persistence ? conversationIdRef.current : null,
+      });
+    },
+    [persistence],
+  );
+
   const session = useRealtimeSession({
     initialHistory: initialMessages,
     instructions,
     voice: settings.voice,
     sessionDefaults,
+    onRememberFact: handleRememberFact,
   });
+  // 引用稳定(useCallback),可以安全放进 effect 依赖
+  const { attachMessageId } = session;
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -246,15 +283,16 @@ export function ChatPanel({
   );
 
   const applyPersona = useCallback(
-    (personaId: string) => {
-      const preset = findPreset(personaId);
-      // 选预设时一并套用它的默认音色,让"人格与音色"成套
+    (personaId: string, voice: string) => {
+      // 人格-音色成套生效(step2 T3):音色取人格记录上绑定的那个,
+      // 查不到记录(如 step1 遗留的 'custom')时沿用当前音色
+      const persona = personas.find((p) => p.id === personaId) ?? null;
       applySettings(
-        { personaId, voice: preset?.voice ?? settings.voice },
-        `已切换到「${preset?.name ?? "自定义"}」,正在开启新会话`,
+        { personaId, voice },
+        `已切换到「${persona?.name ?? "自定义"}」,正在开启新会话`,
       );
     },
-    [applySettings, settings.voice],
+    [applySettings, personas],
   );
 
   const applyVoice = useCallback(
@@ -295,13 +333,24 @@ export function ChatPanel({
     const pending = session.history.slice(persistedCountRef.current);
     if (pending.length === 0) return;
     persistedCountRef.current = session.history.length;
+    // 服务端会过滤掉空白内容的条目,返回的 ids 顺序与**过滤后**的条目一致;
+    // 这里用同样的规则过滤一遍再按位对齐(两端规则必须保持一致)
+    const clean = pending.filter((entry) => entry.text.trim() !== "");
     void appendMessagesAction(
       conversationId,
       pending.map((entry) => ({ role: entry.role, content: entry.text })),
-    ).then((ok) => {
-      if (!ok) setPersistFailed(true);
+    ).then((result) => {
+      if (!result.ok) {
+        setPersistFailed(true);
+        return;
+      }
+      // 把 messages.id 挂回字幕条目 —— 只有带 dbId 的回复才能打 👍/👎
+      result.ids.forEach((messageId, index) => {
+        const entry = clean[index];
+        if (entry !== undefined) attachMessageId(entry.id, messageId);
+      });
     });
-  }, [session.history, conversationId, persistence]);
+  }, [session.history, conversationId, persistence, attachMessageId]);
 
   // 会话从活跃转为非活跃时兜底触发一次记忆抽取(会话中还有按消息数触发的一路)
   const wasActiveRef = useRef(false);
@@ -443,7 +492,10 @@ export function ChatPanel({
             ) : null}
 
             {session.history.map((entry) => (
-              <div key={entry.id} className={`flex ${entry.role === "user" ? "justify-end" : "justify-start"}`}>
+              <div
+                key={entry.id}
+                className={`flex flex-col ${entry.role === "user" ? "items-end" : "items-start"}`}
+              >
                 <p
                   className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-6 ${
                     entry.role === "user"
@@ -453,6 +505,10 @@ export function ChatPanel({
                 >
                   {entry.text}
                 </p>
+                {/* 反馈只对 AI 的回复开放,且要等这条落库拿到 message id 之后 */}
+                {entry.role === "assistant" && entry.dbId !== undefined ? (
+                  <MessageFeedback messageId={entry.dbId} initialScore={entry.feedback ?? null} />
+                ) : null}
               </div>
             ))}
 
@@ -493,6 +549,7 @@ export function ChatPanel({
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         settings={settings}
+        personas={personas}
         sessionActive={active}
         onApplyPersona={applyPersona}
         onApplyVoice={applyVoice}

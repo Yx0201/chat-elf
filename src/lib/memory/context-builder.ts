@@ -17,6 +17,7 @@ import { getDb, isDatabaseConfigured } from "@/lib/db/client";
 import { memories, LOCAL_USER_ID } from "@/lib/db/schema";
 import { loadRecentMessages } from "./conversations";
 import { embedText } from "./embedding";
+import { getProfile } from "./profile";
 
 /** 注入的最近历史条数(spec:起步取 20 条)。 */
 export const RECENT_MESSAGE_LIMIT = 20;
@@ -122,16 +123,29 @@ export async function buildMemoryContext(): Promise<string> {
   try {
     const recent = await loadRecentMessages(RECENT_MESSAGE_LIMIT);
     const pool = await recallMemories(recent);
+    // 画像层(step3 T4)是 LLM 整合过的、已消解冲突的用户速写,
+    // 比碎片记忆更凝练可靠,故注入优先级最高
+    const profile = await getProfile();
     const now = Date.now();
     const top = [...pool].sort((a, b) => scoreOf(b, now) - scoreOf(a, now)).slice(0, RECALL_LIMIT);
 
-    if (recent.length === 0 && top.length === 0) return "";
+    if (recent.length === 0 && top.length === 0 && profile === null) return "";
 
     void touchMemories(top.map((m) => m.id)).catch((error: unknown) => {
       console.error("[memory] 刷新 last_accessed_at 失败:", error);
     });
 
     const parts: string[] = [];
+
+    if (profile !== null) {
+      const fields = Object.entries(profile.traits)
+        .map(([key, value]) => `${key}=${value}`)
+        .join(" · ");
+      parts.push(
+        `【用户画像(长期整理所得,以它为准)】\n${profile.summary}` +
+          (fields === "" ? "" : `\n关键事实:${fields}`),
+      );
+    }
 
     if (top.length > 0) {
       parts.push(

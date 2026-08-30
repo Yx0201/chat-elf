@@ -1,7 +1,10 @@
 /**
- * 人格 / 音色设置的本地持久化(step1 P1、P2)。
+ * 人格 / 音色的本地持久化(step1 P1、P2;step2 沿用)。
  *
- * 本期存 localStorage(spec P1 明确要求),P4 落库后迁移至 conversations.persona。
+ * 存什么:**当前选中的人格 id 与音色**。人格的定义本身在 personas 表里(step2),
+ * 这里只存"当前用哪一个" —— 因为服务端读不到浏览器存储,而"开新会话要用哪个
+ * 人格"这个选择必须由客户端带给 Server Action。
+ *
  * key 前缀统一 `chat-elf:`(ui spec §4 约定)。
  *
  * SSR 安全:本模块会被 Server Component 间接引用(经客户端组件),
@@ -9,12 +12,7 @@
  * (Safari 无痕模式、配额耗尽、用户禁用存储都会抛错,设置项失败不应拖垮对话页)。
  */
 
-import {
-  CUSTOM_PERSONA_ID,
-  DEFAULT_PERSONA_ID,
-  findPreset,
-  PERSONA_PRESETS,
-} from "./presets";
+import { DEFAULT_PERSONA_ID, findPreset } from "./presets";
 import { DEFAULT_VOICE, isKnownVoice } from "./voices";
 
 const STORAGE_PREFIX = "chat-elf:";
@@ -24,9 +22,14 @@ const SETTINGS_KEY = `${STORAGE_PREFIX}settings`;
 const MAX_CUSTOM_LENGTH = 4000;
 
 export interface PersonaSettings {
-  /** 预设人格 id,或 CUSTOM_PERSONA_ID */
+  /**
+   * 人格 id。step2 起值域为三者之一:
+   *   - 预设的 archetype(如 `'xiaoyou'`)—— 不依赖数据库也存在;
+   *   - `personas` 表的 uuid —— 用户自建 / 预设另存的副本;
+   *   - `CUSTOM_PERSONA_ID` —— step1 遗留的本地自定义文案。
+   */
   personaId: string;
-  /** personaId === CUSTOM_PERSONA_ID 时生效的自定义人设文案 */
+  /** personaId === CUSTOM_PERSONA_ID 时生效的自定义人设文案(step1 遗留路径) */
   customInstructions: string;
   /** session.update.voice 取值 */
   voice: string;
@@ -47,11 +50,11 @@ function parseSettings(raw: unknown): PersonaSettings | null {
   if (typeof raw !== "object" || raw === null) return null;
   const record = raw as Record<string, unknown>;
 
+  // 不再枚举校验:step2 起人格存在 personas 表里,合法 id 是数据库分配出来的
+  // uuid,前端无法枚举。查不到时由渲染层回落默认人格。
   const personaId =
-    typeof record.personaId === "string" &&
-    (record.personaId === CUSTOM_PERSONA_ID ||
-      PERSONA_PRESETS.some((p) => p.id === record.personaId))
-      ? record.personaId
+    typeof record.personaId === "string" && record.personaId.trim() !== ""
+      ? record.personaId.trim()
       : null;
 
   const customInstructions =

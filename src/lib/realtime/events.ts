@@ -82,18 +82,24 @@ export interface ItemContentPart {
   transcript?: string;
 }
 
-/** 对话项(message 或 function_call)。 */
+/**
+ * 对话项(message / function_call / function_call_output)。
+ * 后两种用于 Function Calling:服务端下发 function_call,客户端执行后
+ * 以 function_call_output 写回结果(用 call_id 关联)。
+ */
 export interface ConversationItem {
   id?: string;
   object?: "realtime.item";
   status?: string;
   role?: "user" | "assistant" | "system";
-  type?: "message" | "function_call";
+  type?: "message" | "function_call" | "function_call_output";
   content?: ItemContentPart[];
   /** function_call 时存在 */
   name?: string;
   call_id?: string;
   arguments?: string;
+  /** function_call_output 时存在:工具执行结果,JSON 字符串 */
+  output?: string;
 }
 
 /** 输出项(response.output 内元素),结构同对话项。 */

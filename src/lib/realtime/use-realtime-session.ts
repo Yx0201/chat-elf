@@ -24,10 +24,55 @@ import { moodFromUserEmotion, prosodyToMood, textMood, type ElfMood, type Prosod
 import { parseServerEvent } from "@/lib/realtime/parse-events";
 import {
   DASHSCOPE_SESSION_DEFAULTS,
+  REMEMBER_FACT_TOOL,
+  REMEMBER_FACT_TOOL_NAME,
   type RealtimeSessionDefaults,
 } from "@/lib/realtime/session-defaults";
 
 const SESSION_SIGNALING_PATH = "/api/realtime/session";
+
+/** 单会话内模型调用工具的次数上限(spec T2 的防滥用要求)。 */
+const MAX_TOOL_CALLS_PER_SESSION = 10;
+
+const REMEMBER_FACT_CATEGORIES: readonly string[] = [
+  "fact",
+  "preference",
+  "event",
+  "relationship",
+  "emotion",
+];
+
+/**
+ * 解析模型给出的工具入参 —— arguments 是 JSON 字符串,且模型可能不按 schema 来
+ * (缺字段、字段类型不对、塞进多余内容),逐字段收窄后才敢用。
+ */
+function parseRememberFactArguments(
+  raw: string | undefined,
+): { content: string; category: string; importance: number } | null {
+  if (raw === undefined) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const record = parsed as Record<string, unknown>;
+
+  const content = typeof record.content === "string" ? record.content.trim() : "";
+  if (content === "") return null;
+
+  const category =
+    typeof record.category === "string" && REMEMBER_FACT_CATEGORIES.includes(record.category)
+      ? record.category
+      : "fact";
+  const importance =
+    typeof record.importance === "number" && Number.isFinite(record.importance)
+      ? Math.min(1, Math.max(0, record.importance))
+      : 0.6; // 模型没给就取中间值,不要按 0 处理 —— 0 会让记忆几乎检索不到
+
+  return { content: content.slice(0, 200), category, importance };
+}
 
 /** 默认人设(instructions);后续由记忆层 context-builder 动态组装。 */
 export const DEFAULT_INSTRUCTIONS =
@@ -47,12 +92,23 @@ export interface TranscriptEntry {
   id: string;
   role: "user" | "assistant";
   text: string;
+  /**
+   * 落库后回填的 `messages.id`(step2 T4 的反馈埋点需要它)。
+   * 播种的历史条目在服务端读取时就带上;会话中新产生的条目要等落库返回才有值。
+   */
+  dbId?: string;
+  /** 该条已收到的反馈(👍 = 1 / 👎 = -1);历史条目从库里带出 */
+  feedback?: 1 | -1 | null;
 }
 
 /** 播种用的历史条目：来自数据库，id 由 Hook 生成。 */
 export interface SeedTranscriptEntry {
   role: TranscriptEntry["role"];
   text: string;
+  /** 该条在 messages 表的主键；有了它历史消息也能打 👍/👎 */
+  dbId?: string;
+  /** 该条已收到的反馈 */
+  feedback?: 1 | -1 | null;
 }
 
 interface RealtimeState {
@@ -90,7 +146,9 @@ type RealtimeAction =
   /** 一轮响应收尾(每次响应只采纳第一个到达的收尾事件) */
   | { kind: "assistant-settle"; fallback: string }
   /** 用户打断:丢弃尚未播完的助手字幕残留 */
-  | { kind: "barge-in" };
+  | { kind: "barge-in" }
+  /** 转写落库后把 messages.id 挂到对应字幕条目上(供 👍/👎 反馈定位) */
+  | { kind: "attach-db-id"; entryId: string; messageId: string };
 
 let entrySeq = 0;
 
@@ -165,6 +223,13 @@ function reducer(state: RealtimeState, action: RealtimeAction): RealtimeState {
       return state.assistantPartial === ""
         ? state
         : { ...state, assistantPartial: "" };
+    case "attach-db-id": {
+      const index = state.history.findIndex((entry) => entry.id === action.entryId);
+      if (index === -1 || state.history[index].dbId === action.messageId) return state;
+      const history = [...state.history];
+      history[index] = { ...history[index], dbId: action.messageId };
+      return { ...state, history };
+    }
   }
 }
 
@@ -218,6 +283,11 @@ export interface UseRealtimeSessionOptions {
    * 未注入时按 dashscope 旧行为兜底,保证 Hook 可独立使用。
    */
   sessionDefaults?: RealtimeSessionDefaults;
+  /**
+   * 模型在会话中调用 `remember_fact` 工具时的回调(step3 T2 实时标记轨)。
+   * 不传 = 不注册该工具(对话照常,记忆只走会话后的批量抽取兜底)。
+   */
+  onRememberFact?: (fact: { content: string; category: string; importance: number }) => void;
 }
 
 export interface UseRealtimeSessionResult extends RealtimeState {
@@ -227,6 +297,11 @@ export interface UseRealtimeSessionResult extends RealtimeState {
   stop: () => void;
   toggle: () => void;
   clearError: () => void;
+  /**
+   * 转写落库后把 `messages.id` 挂回字幕条目(step2 T4)。
+   * 只有带 dbId 的条目才能打 👍/👎 —— 反馈要能定位到库里那一行才有分析价值。
+   */
+  attachMessageId: (entryId: string, messageId: string) => void;
 }
 
 export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): UseRealtimeSessionResult {
@@ -236,6 +311,8 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
       id: `h-${index}`,
       role: entry.role,
       text: entry.text,
+      ...(entry.dbId === undefined ? {} : { dbId: entry.dbId }),
+      ...(entry.feedback === undefined ? {} : { feedback: entry.feedback }),
     })),
   );
   const [state, dispatch] = useReducer(reducer, seededHistory, initialState);
@@ -256,6 +333,8 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
     ticks: number;
   } | null>(null);
   const optionsRef = useRef(options);
+  /** 本会话已处理的工具调用次数(防滥用上限);每次 start 重置 */
+  const toolCallsRef = useRef(0);
   // react-hooks/refs:渲染期禁止写 ref,统一在渲染后同步
   useEffect(() => {
     optionsRef.current = options;
@@ -286,6 +365,17 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
       },
     });
     if (!ok) dispatch({ kind: "error", message: "发送 session.update 失败:没有打开的数据通道" });
+
+    // 工具在**第二条** session.update 里单独注册(step3 T2)。
+    // 分两次发是为了隔离风险:这条请求若被服务端以"不支持 tools"拒绝,
+    // 上面的核心配置已经生效,对话照常进行,只是没有实时记忆标记 ——
+    // 记忆还有会话后的批量抽取兜底。合在一条里发则一次失败全盘皆输。
+    if (ok && opts.onRememberFact !== undefined) {
+      sendClientEvent({
+        type: "session.update",
+        session: { tools: [REMEMBER_FACT_TOOL] },
+      });
+    }
   }, [sendClientEvent]);
 
   const gateMedia = useCallback((enabled: boolean) => {
@@ -399,7 +489,40 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
           dispatch({ kind: "status", status: "live" });
           break;
         }
-        case "error":
+        case "response.function_call_arguments.done": {
+          if (event.name !== REMEMBER_FACT_TOOL_NAME || event.call_id === undefined) break;
+
+          // **先回执、再落库**。模型在等 function_call_output,不回就不继续说 ——
+          // 用户会听到一段没有尽头的沉默。回执内容固定为 ok,不携带落库结果:
+          // 模型不需要知道数据库是否写成功,而且它也没法重试。
+          const callId = event.call_id;
+          sendClientEvent({
+            type: "conversation.item.create",
+            item: {
+              type: "function_call_output",
+              call_id: callId,
+              output: JSON.stringify({ ok: true }),
+            },
+          });
+          sendClientEvent({ type: "response.create" });
+
+          toolCallsRef.current += 1;
+          if (toolCallsRef.current > MAX_TOOL_CALLS_PER_SESSION) {
+            console.warn("[realtime] 已达单会话工具调用上限,忽略本次标记");
+            break;
+          }
+          const fact = parseRememberFactArguments(event.arguments);
+          if (fact !== null) optionsRef.current.onRememberFact?.(fact);
+          break;
+        }
+        case "error": {
+          // 注册工具失败是可接受的降级(见 sendSessionUpdate 的注释):
+          // 只记日志,不打断用户 —— 记忆仍有会话后的批量抽取兜底
+          const param = event.error.param ?? "";
+          if (param.includes("tools")) {
+            console.warn("[realtime] 工具注册被服务端拒绝,实时记忆标记不可用:", event.error.message ?? param);
+            break;
+          }
           dispatch({
             kind: "error",
             message: `服务端错误:${
@@ -407,6 +530,7 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
             }`,
           });
           break;
+        }
         default:
           break;
       }
@@ -470,6 +594,7 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
   const start = useCallback(async () => {
     if (aliveRef.current) return;
     aliveRef.current = true;
+    toolCallsRef.current = 0;
     dispatch({ kind: "clear-error" });
 
     let pc: RTCPeerConnection | null = null;
@@ -565,6 +690,10 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
 
   const clearError = useCallback(() => dispatch({ kind: "clear-error" }), []);
 
+  const attachMessageId = useCallback((entryId: string, messageId: string) => {
+    dispatch({ kind: "attach-db-id", entryId, messageId });
+  }, []);
+
   // 卸载时释放媒体与连接
   useEffect(() => teardown, [teardown]);
 
@@ -576,5 +705,5 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
         ? moodFromUserEmotion(state.userEmotion)
         : "neutral";
 
-  return { ...state, mood: derivedMood, start, stop, toggle, clearError };
+  return { ...state, mood: derivedMood, start, stop, toggle, clearError, attachMessageId };
 }

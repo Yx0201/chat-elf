@@ -68,7 +68,7 @@ qwen3.5-omni-flash-realtime 支持 WebSocket / WebRTC / AOQ 三种接入协议�
 
 - **qwen-audio-3.0 系列**（tokenplan）：`turn_detection` 仅支持 `server_vad` / `smart_turn` / `null`（无 `semantic_vad`）；无 `idle_timeout_ms`（静默主动找话在该模型不可用）；无独立输入转写配置项（转写默认开启）；默认音色 `longanqian`；上下文上限更低（50 轮音频 / 300 秒）。附加能力（2026-08-29 依据[官方文档](https://help.aliyun.com/zh/model-studio/qwen-audio-realtime-user-guides)核实）：
   - **系统音色共 5 个**（`src/lib/persona/voices.ts`）：`longanqian`（默认）、`longanlingxin`、`longanlingxi`、`longanxiaoxin`、`longanlufeng`。⚠️ 官方**没有** Realtime 专属音色列表页（`/zh/model-studio/qwen-audio-realtime-voice-list` 为 404），代码里的中文特质取自同名 TTS 音色页，而 TTS 文档明确"每个模型仅支持一组特定的音色、不能混用"，故标注为**参考值、未核实**。
-  - **支持 Function Calling** —— 会话中实时记忆标记可行，无需依赖通道降级。
+  - **支持 Function Calling** —— 会话中实时记忆标记可行，无需依赖通道降级。2026-08-30 已落地，见「Function Calling」。
   - **支持声音复刻音色**：复刻接口 `target_model` 填 `qwen-audio-3.0-realtime-plus`，返回的 `voice_id` 可直接用作 `voice` → **音色克隆可接入实时链路**。
   - 新增可用参数 `max_history_turns`（1-50，默认 20，见「模型已知约束」）。
   - **不支持图片输入**（纯语音模型）——图片解读必须切 dashscope 通道；本项目已决定不做图片能力。
@@ -105,17 +105,41 @@ DashScope WebRTC 信令端点形态（以官方文档为准）：
 | 文本（记忆抽取 / 摘要） | `qwen-plus`（`DASHSCOPE_TEXT_MODEL` 可覆盖） | chat completions 与 `response_format: json_schema` 结构化输出均正常 |
 | 文本向量 | `text-embedding-v3`（`DASHSCOPE_EMBEDDING_MODEL` 可覆盖） | 默认维度 **1024**；v3 / v4 / qwen3.7-text-embedding 三者默认维度都是 1024，故取 1024 可在换模型时不改表 |
 
-记忆分三层管理：
+### 记忆：四层 + 双轨写入（2026-08-30 修订）
 
-1. **工作记忆**：当前 realtime 会话内的上下文，由 `session.update` 的 `instructions` 承载；
-2. **情景记忆**：每次对话的转写文本逐条落库 `messages` 表；
-3. **语义记忆**：跨会话的长期事实与用户偏好，存 `memories` 表并生成嵌入向量，用 pgvector 相似度检索。检索打分 = `相似度 × 时间衰减 × 情感加权`，情感浓度高的记忆衰减更慢（情感 0.98/天 vs 普通 0.95/天）——没有遗忘机制的记忆系统会像"全知监控"，破坏人感。
+| 层 | 载体 | 内容 |
+| --- | --- | --- |
+| 工作记忆 | `session.update` 的 `instructions` | 人格 + 记忆上下文，当前会话可见 |
+| 情景记忆 | `messages` 表 | 逐条转写，按时间检索 |
+| 语义记忆（碎片层） | `memories` 表 + pgvector | 长期事实/偏好/事件，向量检索 |
+| **画像层** | `user_profile` 表 | LLM 整合出的人物速写 + 结构化字段（step3 T4） |
 
-上下文管理流程（2026-08-29 落地形态）：对话页是 Server Component 且 `dynamic = "force-dynamic"`，**每次进入都重新**检索语义记忆 + 取最近 20 条历史，组装成一段 `memoryContext` 传给客户端；客户端把它拼在人格 `instructions` **之后**一起经 `session.update` 下发（人格定调，记忆补事实）。这一步是长对话记忆的唯一来源——不能依赖模型会话内的历史保留（见"模型已知约束"）。
+**碎片层与画像层的分工是刻意设计的**：
 
-写入路径：转写条目由客户端经 Server Action 落 `messages`；单会话消息数每跨过 8 的整数倍、以及会话结束时，用 `after()`（`next/server`）排到响应之后触发一次记忆抽取（`generateObject` + zod）。⚠️ serverless 环境下 `after()` 有执行时长上限，长会话抽取可能被截断——上线前需评估是否改为独立后台任务。
+- 碎片层 **ADD-only** —— "住北京"与"搬上海"共存，靠时间戳消解，保留时序可追溯（也是用户删错记忆后能靠转写找回的基础）；
+- 画像层 **每次整体重写** —— 冲突由 LLM 在重写时消解成"现居上海，此前在北京"。重写只发生在画像层，事实层不动。
 
-后台 agent 任务：走 AI SDK 的 `generateText` / `generateObject` + zod schema，跑在 Server Actions 或 Route Handler 中。**已落地**：记忆抽取（含相似度 > 0.9 判重）。**尚未做**：AI 生成会话标题（当前用首条用户消息前 40 字回填）、会话内容总结。
+检索打分 = `相似度 × 时间衰减 × 情感加权`，情感浓度高的记忆衰减更慢（情感 0.98/天 vs 普通 0.95/天）——没有遗忘机制的记忆系统会像"全知监控"，破坏人感。
+
+**双轨写入**：
+
+1. **会话后批量轨**（2026-08-29 落地）：消息数每跨过 8 的整数倍 + 会话结束时兜底，均用 `after()` 排到响应之后；
+2. **会话中实时轨**（2026-08-30 落地，step3 T2）：向 realtime 会话注册 `remember_fact` 工具，模型当场调用 → 客户端写库。协议已核实，见「Function Calling」。
+
+两条轨共用 `upsertMemory()`，去重规则一致（相似度 > 0.9 视为同一件事）—— 否则同一件事会被记两遍。
+
+上下文管理流程：对话页是 Server Component 且 `dynamic = "force-dynamic"`，**每次进入都重新**取画像 + 检索语义记忆 + 取最近 20 条历史，组装成一段 `memoryContext` 传给客户端。注入顺序 **人格 → 工具使用说明 → 画像 → 碎片记忆 → 最近历史**（人格定调，画像最凝练故优先级最高）。这一步是长对话记忆的唯一来源——不能依赖模型会话内的历史保留（见"模型已知约束"）。
+
+画像触发：每结束 3 个会话才重写一次（`PROFILE_REFRESH_EVERY`），不是每会话都做 —— 画像是慢变量，每会话重写成本高且无必要（sleep-time compute 思想：异步、不在语音延迟关键路径上）。计数先落库再整合，整合适败计数不丢、下次再试。
+
+⚠️ serverless 环境下 `after()` 有执行时长上限，长会话抽取可能被截断——上线前需评估是否改为独立后台任务。
+
+后台 agent 任务：走 AI SDK 的 `generateText` / `generateObject` + zod schema，跑在 Server Actions 或 Route Handler 中。**已落地**：记忆抽取（含相似度 > 0.9 判重）、画像整合。**尚未做**：AI 生成会话标题（当前用首条用户消息前 40 字回填）、会话内容总结、低频记忆自动归档。
+
+**DashScope 兼容层的两个实测坑（2026-08-30，写新的 `generateObject` 调用时必须处理）**：
+
+1. `response_format: json_object` 模式下，**提示词里必须出现 "json" 这个词**，否则直接报 400 `InternalError.Algo.InvalidParameter: 'messages' must contain the word 'json' in some form`。
+2. **模型会擅自改输出字段名**（实测把画像的 `summary` 输出成 `bio`）。zod 的 `z.object` 对改名是**直接判失败**，会让 `generateObject` 抛 "did not match schema"。对策两道：提示词里给输出结构示例并声明"字段名一字不改"；schema 接住同义字段后 transform。抽取类 schema 的每个字段还应带 `.catch()` —— 整批解析时一条字段不合法会报废整轮。
 
 ## 持久化架构【已确认，2026-08-29 修订】
 
@@ -137,9 +161,31 @@ DashScope WebRTC 信令端点形态（以官方文档为准）：
 - `turn_detection`: `server_vad` + `idle_timeout_ms: 8000`（2026-08-27 修订：产品定位以闲聊为主，用户静默片刻后模型主动抛话头引导对话更贴合场景；`idle_timeout_ms` 仅 qwen3.5 omni 系列 + server_vad 生效，取值范围 [5000, 30000]。原定的 `semantic_vad` 与其互斥，保留为语义断句需求时的回退项）
 - 打断处理（barge-in）：监听 `input_audio_buffer.speech_started` 事件——客户端对本地播放做音量淡出后重挂流（清空残余缓冲）并更新 UI 状态；同时对 in-flight 响应显式发送 `response.cancel`（文档唯一保证的取消手段），确保服务端停止生成旧答案
 - 开启输入音频转写（用户语音→文字字幕），输出侧消费 `response.audio_transcript.delta/done` 作为助手字幕
+- `session.update` **发两次**（2026-08-30 起）：第一条承载 modalities / voice / instructions / turn_detection 等核心配置，第二条只带 `tools`（Function Calling）。拆开发是为了隔离风险 —— 工具注册若被服务端拒绝，核心配置已生效、对话照常。细节见「Function Calling」。
 - `voice` 与 `instructions` 都**只在建连时（第一次 `session.update`）生效**，会话中无法修改 → **切换人格或音色 = 开新会话**。UI 必须明示这一点：变更即结束当前通话并以 toast 告知（`src/components/chat/settings-sheet.tsx`）。
 - `voice` 取值见「接入通道双轨制」的音色清单。`instructions` 由**人格模板 + 语音播报约束 + 不可覆盖的安全段**拼接（`src/lib/persona/presets.ts`）；安全段含 AI 身份披露与"不扮演心理/医疗专业人士"，人格自定义无法覆盖它 —— 合规要求必须从第一期就埋进架构，不能后补。
 - 韵律启发式（`src/lib/realtime/mood.ts`）的基频/能量阈值是按 dashscope 通道的 **Tina** 音色标定的。当前默认通道是 tokenplan（音色 `longanqian`），标定并不适用 → 非 Tina 音色一律**跳过韵律层**，表情退化为 ASR 原生 emotion + 流式文本词典两层（由 `PROSODY_CALIBRATED_VOICE` 门控，见 `use-realtime-session.ts`）。
+
+## Function Calling【已确认，2026-08-30 落地】
+
+用于 step3 的"会话中实时记忆标记"。协议依据官方[客户端事件](https://help.aliyun.com/zh/model-studio/fun-audiochat-client-events)与[服务端事件](https://help.aliyun.com/zh/model-studio/qwen-audio-realtime-server-events)文档核实：
+
+| 环节 | 事件 / 结构 |
+| --- | --- |
+| 注册 | `session.update` → `session.tools: [{ type:"function", function:{ name, description, parameters:{type:"object", properties, required} } }]` |
+| 服务端下发 | `response.function_call_arguments.done`，携带 `call_id` / `name` / `arguments`（完整参数 JSON 字符串） |
+| 回传结果 | `conversation.item.create` → `item: { type:"function_call_output", call_id, output:"<JSON 字符串>" }` |
+| 触发二轮推理 | `response.create` |
+
+约束：`tools` 与 `enable_search` 互斥（本项目不开联网搜索）；server_vad 下手动 `response.create` 需当前无响应在生成。
+
+三个关键实现决策（`use-realtime-session.ts`）：
+
+1. **工具放在第二条 `session.update` 单独注册**。第一条承载 voice / instructions / turn_detection 等核心配置，第二条只带 `tools`。若服务端以"不支持 tools"拒绝，核心配置已生效，对话照常进行 —— 合在一条里发则一次失败全盘皆输。
+2. **先回执、再落库**。模型在等 `function_call_output`，不回就不继续说话，用户会听到一段没有尽头的沉默。回执内容固定 `{"ok":true}`，不携带落库结果（模型无法重试，知道了也没用）。
+3. **单会话上限 10 次**（`MAX_TOOL_CALLS_PER_SESSION`），超出忽略。
+
+工具定义见 `REMEMBER_FACT_TOOL`（`session-defaults.ts`）：`description` 承担"什么时候该调用"的全部规则（模型看不到我们的代码注释）；"调用后怎么表现"（不要对麦克风说"我记下了"）写进 instructions 的 `REMEMBER_FACT_USAGE_HINT`。
 
 ## 环境变量【已确认】
 
@@ -168,10 +214,16 @@ src/
   app/
     page.tsx                        # 首页：开始新会话 + 历史会话列表（Server Component 直取）
     chat/[conversationId]/page.tsx  # 对话页（Server Component，组装 memoryContext 注入客户端）
+    persona/page.tsx                # 人格库（step2）
+    persona/new/page.tsx            # 新建人格（静态段优先于 [personaId]）
+    persona/[personaId]/page.tsx    # 编辑人格（预设只读 + 另存副本）
+    memory/page.tsx                 # 「TA 记得你」记忆可视化页（step3）
     api/
       realtime/session/route.ts     # WebRTC SDP 信令转发（核心，Node runtime）
   components/
-    chat/                           # 表情球、字幕、控制条、设置抽屉、删除按钮
+    chat/                           # 表情球、字幕、控制条、设置抽屉、删除按钮、消息反馈
+    persona/                        # 人格编辑器、人格列表、页面 header（step2）
+    memory/memory-list.tsx          # 记忆列表 + 画像卡（step3）
   lib/
     ai/provider.ts                  # AI SDK provider（DashScope OpenAI 兼容模式）
     db/
@@ -180,14 +232,22 @@ src/
     dashscope/config.ts             # 模型名、端点拼装、区域配置
     tokenplan/config.ts             # Token Plan 通道配置
     memory/
-      actions.ts                    # Server Actions：新建会话 / 转写落库 / 抽取 / 删除
+      actions.ts                    # Server Actions：会话 / 转写 / 抽取 / 画像 / 记忆删除 / 反馈
       conversations.ts              # 会话与消息 CRUD（入参过 UUID 校验）
-      context-builder.ts            # 语义记忆检索（含遗忘衰减）+ 最近历史组装
-      tasks.ts                      # 记忆抽取（generateObject + zod）+ 相似度判重
+      context-builder.ts            # 画像 + 语义记忆检索（含遗忘衰减）+ 最近历史组装
+      tasks.ts                      # 记忆抽取（generateObject + zod）+ 相似度判重 + upsert
+      profile.ts                    # 画像整合（LLM 整体重写）+ 会话计数触发
+      store.ts                      # 记忆的列表 / 物理删除（管理页用）
+      feedback.ts                   # 👍/👎 埋点读写（幂等：同分撤销、异分改判）
       embedding.ts                  # text-embedding-v3 向量化（失败返回 null，不阻塞链路）
     persona/
       presets.ts                    # 人格预设 + 播报约束 + 不可覆盖安全段
       voices.ts                     # 系统音色清单 + 韵律标定音色常量
+      traits.ts                     # 人格矩阵维度定义 + zod schema + 解析
+      render.ts                     # 人格 → instructions 渲染器（编辑器预览同源）
+      repository.ts                 # personas 表读写（服务端）
+      types.ts                      # 类型与纯常量（**不得 import 服务端模块**，见下）
+      resolve.ts                    # localStorage 里的 personaId → 可渲染人格（纯函数）
       settings.ts                   # localStorage 持久化（前缀 chat-elf:）
       use-settings.ts               # useSyncExternalStore 订阅
     realtime/
@@ -201,12 +261,26 @@ src/
 db/migrations/                      # 建表 SQL（手写、幂等，迁移的真相源）
 ```
 
-数据模型（2026-08-29 已落地，见 `db/migrations/0001_init.sql`，全部幂等可重复执行）：
+数据模型（迁移文件全部幂等可重复执行）：
 
-- `conversations(id uuid pk, user_id text, title text, persona text, voice text, created_at, updated_at)`
-- `messages(id, conversation_id → conversations.id ON DELETE CASCADE, role ∈ {user,assistant,system}, content, created_at)`
-- `memories(id, user_id, content, category ∈ {fact,preference,event,relationship,emotion}, importance real, emotion_score real, embedding vector(1024), source_conversation_id → conversations.id ON DELETE SET NULL, last_confirmed_at, last_accessed_at, archived bool, created_at)`
-  - `embedding` 上有 HNSW 余弦索引（`vector_cosine_ops`）用于语义检索；`archived = true` 的记忆不进检索结果但不物理删除。
+- `0001_init.sql`（2026-08-29）
+  - `conversations(id uuid pk, user_id text, title text, persona text, voice text, created_at, updated_at)`
+  - `messages(id, conversation_id → conversations.id ON DELETE CASCADE, role ∈ {user,assistant,system}, content, created_at)`
+  - `memories(id, user_id, content, category ∈ {fact,preference,event,relationship,emotion}, importance real, emotion_score real, embedding vector(1024), source_conversation_id → conversations.id ON DELETE SET NULL, last_confirmed_at, last_accessed_at, archived bool, created_at)`
+    - `embedding` 上有 HNSW 余弦索引（`vector_cosine_ops`）用于语义检索；`archived = true` 的记忆不进检索结果但不物理删除。
+- `0002_personas.sql`（2026-08-30，step2）
+  - `personas(id uuid pk, user_id, name, emoji, tagline, archetype, traits jsonb, voice, backstory, boundaries, is_preset bool, created_at, updated_at)`
+    - `archetype` 是模板来源 id（如 `xiaoyou`），用户自建为 `NULL`；`(user_id, archetype)` 上有 partial unique index，使种子可幂等重复插入。
+    - `traits` 存 jsonb 而非 6 个固定列：人格维度会随产品演进增减，拆列则每加一维都要改表。解析交给 `parseTraits()`，非法值回落中性。
+    - ⚠️ **预设的 traits / backstory 在 SQL 种子与 `src/lib/persona/presets.ts` 里各存一份** —— 后者是"未配置 DATABASE_URL 时的降级数据源"，两处不一致会导致有库/无库两种环境下人格表现不同。改任一侧必须同步另一侧。
+  - `conversations.persona_id uuid → personas.id ON DELETE SET NULL`。**原有的 `persona` / `voice` 文本列保留**，它们是会话发生时的展示快照（人格被删后历史列表仍能显示"当时聊的是谁"）。
+- `0003_feedback.sql`（2026-08-30，step2）
+  - `feedback(id, message_id → messages.id ON DELETE CASCADE, score smallint ∈ {-1,1}, created_at)`，`message_id` 唯一：同分即撤销、异分即改判。只埋点不分析。
+- `0004_user_profile.sql`（2026-08-30，step3）
+  - `user_profile(user_id pk, summary text, traits jsonb, pending_conversations int, updated_at, refreshed_at)` —— 画像层，见「Agentic 层架构」的双层分工。
+- `0005_memory_source.sql`（2026-08-30，step3）
+  - `memories.source text ∈ {batch, realtime}`（带 CHECK 约束），区分两条写入轨。
+
 - 需启用 `vector` 扩展（本机 Homebrew PG 17.5 自带 0.8.0，见「持久化架构」的事实更正）。
 
 realtime 会话是易失的，文本转写在每轮响应定稿后异步入库，这是历史留存与跨设备恢复的唯一可靠途径。
@@ -220,6 +294,7 @@ realtime 会话是易失的，文本转写在每轮响应定稿后异步入库�
 - 密钥与密钥派生值绝不出现在前端可访问代码路径；新增环境变量必须同步 `.env.example`。
 - **禁止在 effect 体内同步调用 `setState`**（`react-hooks/set-state-in-effect`，React Compiler 规则）。需要"外部数据源 → 组件"时用 `useSyncExternalStore`；需要"props 变化时重置局部状态"时用渲染期校正（`if (prop !== prev) setState(prop)`），不要塞进 `useEffect`。在 effect 里改 ref、发请求都是允许的。
 - **客户端传入的 id 是不可信输入**：Server Action 收到会话 id 一律先过 UUID 校验再拼查询（`isValidConversationId`）。
+- **客户端组件只能从"纯模块"导入值**：`import type` 会被编译期擦除、跨边界安全；**值导入则会把整条依赖链拖进客户端 bundle**。踩过的实况（2026-08-30）：人格编辑器从 `persona/repository.ts` 导入两个长度常量，而 repository 依赖 `db/client` → `pg`，构建直接报 `Module not found: Can't resolve 'util/types'`。修法是把类型与纯常量拆到 `persona/types.ts`，该文件的**唯一约束是不得 import 任何服务端模块**；需要共享值常量时先问它属于哪一侧。
 - **增强能力失败必须降级而非抛错**：向量化、记忆检索、转写落库失败时记录日志并返回空结果/ false，绝不能把异常冒泡到语音链路或页面渲染。
 - 提交前运行 `pnpm lint` 与 `pnpm build`。
 

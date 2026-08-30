@@ -9,6 +9,7 @@ import { ChatPanel } from "@/components/chat/chat-panel";
 import { isDatabaseConfigured } from "@/lib/db/client";
 import { loadTranscript } from "@/lib/memory/conversations";
 import { buildMemoryContext } from "@/lib/memory/context-builder";
+import { listPersonas } from "@/lib/persona/repository";
 import { resolveRealtimeSessionDefaults } from "@/lib/realtime/provider";
 import type { SeedTranscriptEntry } from "@/lib/realtime/use-realtime-session";
 
@@ -26,10 +27,18 @@ export default async function ChatPage({
 
   // 进入已有会话时回显历史转写。role 在库里是 text 列,逐条收窄后再传给客户端
   // (不做类型断言);system 角色的注入消息不参与回显。
+  // 一并带出 message id 与已收到的反馈,这样历史消息也能打 👍/👎(step2 T4)。
   const initialMessages: SeedTranscriptEntry[] = persistence
     ? (await loadTranscript(conversationId, MAX_ECHOED_MESSAGES)).flatMap((message) =>
         message.role === "user" || message.role === "assistant"
-          ? [{ role: message.role, text: message.content }]
+          ? [
+              {
+                role: message.role,
+                text: message.content,
+                dbId: message.id,
+                feedback: message.feedback,
+              },
+            ]
           : [],
       )
     : [];
@@ -44,6 +53,9 @@ export default async function ChatPage({
       memoryContext={persistence ? await buildMemoryContext() : ""}
       persistence={persistence}
       initialMessages={initialMessages}
+      // 人格库一次性下发:客户端要用它把 personaId 渲染成 instructions
+      // (instructions 在客户端随 session.update 下发,服务端无法代劳)
+      personas={await listPersonas()}
     />
   );
 }

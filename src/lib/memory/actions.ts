@@ -22,7 +22,10 @@ import {
   isValidConversationId,
   type MessageInput,
 } from "./conversations";
-import { extractMemories } from "./tasks";
+import { rateMessage } from "./feedback";
+import { noteConversationFinished, refreshProfile } from "./profile";
+import { deleteMemory, isValidMemoryId } from "./store";
+import { extractMemories, upsertMemory } from "./tasks";
 
 /** 每积累这么多条消息触发一次会话中抽取;会话结束时再抽一次兜底。 */
 const EXTRACTION_EVERY_N_MESSAGES = 8;
@@ -41,6 +44,9 @@ function readStringField(formData: FormData, key: string): string | null {
  * persona / voice 由客户端表单传入 —— 它们当前只存在 localStorage,服务端读不到,
  * 不传的话历史列表就显示不出人格名(方案 1:首页按钮改为客户端组件读取后提交)。
  *
+ * step2 起 persona 的值域是「预设 archetype 或 personas 表 uuid」。只有后者
+ * 才能写外键,判断交给 `createConversation` 里的 `isValidPersonaId`。
+ *
  * 未配置数据库时退回占位会话(对话仍可用,只是不落库)。
  */
 export async function startConversationAction(formData: FormData): Promise<void> {
@@ -48,7 +54,7 @@ export async function startConversationAction(formData: FormData): Promise<void>
   const voice = readStringField(formData, "voice");
 
   if (!isDatabaseConfigured()) redirect("/chat/local-demo");
-  const id = await createConversation({ persona, voice });
+  const id = await createConversation({ personaId: persona, persona, voice });
   redirect(`/chat/${id}`);
 }
 
@@ -78,6 +84,7 @@ export async function switchConversationAction(input: {
   }
 
   const id = await createConversation({
+    personaId: input.personaId,
     persona: input.personaId,
     voice: input.voice,
   });
@@ -85,23 +92,37 @@ export async function switchConversationAction(input: {
   return id;
 }
 
-/** 转写落库。返回 false 表示持久化不可用(页面据此提示用户)。 */
+export interface AppendMessagesResult {
+  /** 落库是否成功;false 表示持久化不可用(页面据此提示用户) */
+  ok: boolean;
+  /**
+   * 本次落库得到的 message id,顺序与入参 entries 一致(已过滤空内容)。
+   * 客户端用它把字幕条目对应到库里的行,才能给某条回复打 👍/👎(step2 T4)。
+   */
+  ids: string[];
+}
+
+/** 转写落库。 */
 export async function appendMessagesAction(
   conversationId: string,
   entries: readonly MessageInput[],
-): Promise<boolean> {
-  if (!isDatabaseConfigured() || !isValidConversationId(conversationId)) return false;
-  if (entries.length === 0) return true;
+): Promise<AppendMessagesResult> {
+  if (!isDatabaseConfigured() || !isValidConversationId(conversationId)) {
+    return { ok: false, ids: [] };
+  }
+  if (entries.length === 0) return { ok: true, ids: [] };
 
   let inserted = 0;
   let total = 0;
+  let ids: string[] = [];
   try {
     const result = await appendMessages(conversationId, entries);
     inserted = result.inserted;
     total = result.total;
+    ids = result.ids;
   } catch (error) {
     console.error("[memory] 转写落库失败:", error instanceof Error ? error.message : error);
-    return false;
+    return { ok: false, ids: [] };
   }
 
   // 跨过 N 的整数倍就抽一次(用区间跨越判断,避免一次插入多条时错过触发点)
@@ -111,17 +132,104 @@ export async function appendMessagesAction(
     if (afterCount > before) after(() => extractMemories(conversationId));
   }
 
-  return true;
+  return { ok: true, ids };
+}
+
+/**
+ * 给一条回复打 👍/👎,返回**生效后**的分数(null = 已撤销)。
+ *
+ * 幂等:打同一个分是撤销,打不同的分是改判。只埋点,不做任何自动调优。
+ */
+export async function submitFeedbackAction(
+  messageId: string,
+  score: 1 | -1,
+): Promise<1 | -1 | null> {
+  if (!isDatabaseConfigured()) return null;
+  try {
+    return await rateMessage(messageId, score);
+  } catch (error) {
+    console.error("[feedback] 反馈写入失败:", error instanceof Error ? error.message : error);
+    return null;
+  }
 }
 
 /** 会话结束:兜底触发一次记忆抽取。 */
 export async function finishConversationAction(conversationId: string): Promise<void> {
   if (!isDatabaseConfigured() || !isValidConversationId(conversationId)) return;
-  after(() => extractMemories(conversationId));
+  // 会话收尾:兜底抽一次记忆,再累加"已结束会话数"以触发画像整合(step3 T4)。
+  // **顺序有意义** —— 先抽记忆再整画像,否则刚聊完的事要等下一轮才进画像。
+  // 两者都是纯后台任务,排在响应之后,不阻塞返回。
+  after(async () => {
+    await extractMemories(conversationId);
+    await noteConversationFinished();
+  });
 }
 
 export async function deleteConversationAction(conversationId: string): Promise<void> {
   if (!isDatabaseConfigured() || !isValidConversationId(conversationId)) return;
   await deleteConversation(conversationId);
   revalidatePath("/");
+}
+
+/**
+ * 删除一条记忆(step3 T5)。物理删除而非 archived ——
+ * 用户主动删除的语义是"彻底忘掉",不是"暂时不检索"。
+ */
+export async function deleteMemoryAction(memoryId: string): Promise<boolean> {
+  if (!isDatabaseConfigured() || !isValidMemoryId(memoryId)) return false;
+  const ok = await deleteMemory(memoryId);
+  if (ok) revalidatePath("/memory");
+  return ok;
+}
+
+/**
+ * 会话中实时标记轨(step3 T2):模型听到值得记的事实时调用。
+ *
+ * 与批量轨共用 `upsertMemory`,去重规则一致 —— 否则同一件事会被记两遍。
+ * 失败只记日志:模型那边已经收到"记下了"的回执,这里抛错也于事无补。
+ */
+export async function rememberFactAction(input: {
+  content: string;
+  category: string;
+  importance: number;
+  conversationId: string | null;
+}): Promise<boolean> {
+  if (!isDatabaseConfigured()) return false;
+  const conversationId =
+    input.conversationId !== null && isValidConversationId(input.conversationId)
+      ? input.conversationId
+      : null;
+
+  try {
+    const added = await upsertMemory(
+      {
+        content: input.content,
+        category: input.category,
+        importance: input.importance,
+        // 情绪浓度未知:实时工具只让模型给 content/category/importance,
+        // 不让它猜情绪 —— 猜出来的值会直接进入检索打分,不如给 0 中性。
+        emotionScore: 0,
+      },
+      conversationId,
+      "realtime",
+    );
+    if (added) revalidatePath("/memory");
+    return added;
+  } catch (error) {
+    console.error("[memory] 实时记忆写入失败:", error instanceof Error ? error.message : error);
+    return false;
+  }
+}
+
+/**
+ * 立即重新整理画像(step3 T4),不等会话计数到达阈值。
+ *
+ * 用户点了就是想马上看到效果,所以**同步等待**结果 —— 与自动触发的
+ * `noteConversationFinished`(走 after(),不阻塞)刻意不同。
+ */
+export async function refreshProfileAction(): Promise<boolean> {
+  if (!isDatabaseConfigured()) return false;
+  const summary = await refreshProfile();
+  if (summary !== null) revalidatePath("/memory");
+  return summary !== null;
 }

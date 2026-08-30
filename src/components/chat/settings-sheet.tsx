@@ -13,9 +13,12 @@
  * 会话进行中不可改。故任何变更都先结束当前会话,并由父组件以 toast 告知用户。
  */
 
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import type { PersonaRecord } from "@/lib/persona/types";
+import { findPersona } from "@/lib/persona/resolve";
 import type { PersonaSettings } from "@/lib/persona/settings";
-import { CUSTOM_PERSONA_ID, PERSONA_PRESETS } from "@/lib/persona/presets";
+import { CUSTOM_PERSONA_ID } from "@/lib/persona/presets";
 import { REALTIME_VOICES } from "@/lib/persona/voices";
 
 type SheetView = "root" | "persona" | "voice" | "custom";
@@ -24,10 +27,12 @@ export interface SettingsSheetProps {
   open: boolean;
   onClose: () => void;
   settings: PersonaSettings;
+  /** 可用人格(预设 + 自建);step2 起人格在库里,不能再硬编码常量列表 */
+  personas: readonly PersonaRecord[];
   /** 会话进行中:变更需要先结束它 */
   sessionActive: boolean;
-  /** 应用人格(含其默认音色);由父组件负责结束会话与提示 */
-  onApplyPersona: (personaId: string) => void;
+  /** 应用人格(带它绑定的音色);由父组件负责结束会话与提示 */
+  onApplyPersona: (personaId: string, voice: string) => void;
   /** 应用音色 */
   onApplyVoice: (voice: string) => void;
   /** 保存自定义人设文案 */
@@ -107,11 +112,13 @@ export function SettingsSheet({
   open,
   onClose,
   settings,
+  personas,
   sessionActive,
   onApplyPersona,
   onApplyVoice,
   onSaveCustom,
 }: SettingsSheetProps) {
+  const router = useRouter();
   const [view, setView] = useState<SheetView>("root");
   const [draftPersona, setDraftPersona] = useState(settings.personaId);
   const [draftVoice, setDraftVoice] = useState(settings.voice);
@@ -141,10 +148,10 @@ export function SettingsSheet({
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  const currentPreset = PERSONA_PRESETS.find((p) => p.id === settings.personaId) ?? null;
+  const currentPersona = findPersona(settings, personas);
   const isCustom = settings.personaId === CUSTOM_PERSONA_ID;
-  const displayName = isCustom ? "自定义" : (currentPreset?.name ?? "未选择");
-  const displayEmoji = isCustom ? "✏️" : (currentPreset?.emoji ?? "🙂");
+  const displayName = isCustom ? "自定义" : (currentPersona?.name ?? "未选择");
+  const displayEmoji = isCustom ? "✏️" : (currentPersona?.emoji ?? "🙂");
 
   const hint = sessionActive
     ? "当前通话会结束,并为这个人格开启一场新会话"
@@ -204,9 +211,14 @@ export function SettingsSheet({
         <div className="min-h-0 flex-1 overflow-y-auto">
           {view === "root" ? (
             <div className="pb-4">
-              {/* 当前人格卡片:本页唯一的"丰富组件"(ui spec §3.1) */}
+              {/* 当前人格卡片:本页唯一的"丰富组件"(ui spec §3.1)。
+                  step2 起整卡可点 → 跳人格库页面(编辑/新建都收在那里) */}
               <div className="px-4 py-4">
-                <div className="flex items-center gap-3 rounded-xl border border-black/[.06] p-3 dark:border-white/[.08]">
+                <button
+                  type="button"
+                  onClick={() => router.push("/persona")}
+                  className="flex w-full items-center gap-3 rounded-xl border border-black/[.06] p-3 text-left transition-colors hover:bg-black/[.04] dark:border-white/[.08] dark:hover:bg-white/[.06]"
+                >
                   <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-black/[.04] text-2xl dark:bg-white/[.08]">
                     {displayEmoji}
                   </span>
@@ -216,12 +228,20 @@ export function SettingsSheet({
                       音色 {settings.voice}
                     </span>
                   </span>
-                </div>
+                  <span className="shrink-0 text-zinc-300 dark:text-zinc-600">
+                    <ChevronIcon />
+                  </span>
+                </button>
               </div>
 
               <div className="border-t border-black/[.06] dark:border-white/[.08]">
                 <Row onClick={() => setView("persona")}>切换人格</Row>
                 <Row onClick={() => setView("voice")}>音色</Row>
+              </div>
+
+              {/* 「记忆」分组(ui spec §2);内容量大,独立路由 */}
+              <div className="border-t border-black/[.06] dark:border-white/[.08]">
+                <Row onClick={() => router.push("/memory")}>TA 记得你</Row>
               </div>
 
               <p className="px-4 pt-4 text-xs leading-5 text-zinc-400">
@@ -233,19 +253,23 @@ export function SettingsSheet({
 
           {view === "persona" ? (
             <div>
-              {PERSONA_PRESETS.map((preset) => (
+              {personas.map((persona) => (
                 <button
-                  key={preset.id}
+                  key={persona.id}
                   type="button"
-                  onClick={() => setDraftPersona(preset.id)}
+                  onClick={() => setDraftPersona(persona.id)}
                   className="flex min-h-[56px] w-full items-center gap-3 px-4 text-left transition-colors hover:bg-black/[.04] dark:hover:bg-white/[.06]"
                 >
-                  <span className="shrink-0 text-2xl">{preset.emoji}</span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium">{preset.name}</span>
-                    <span className="block truncate text-xs text-zinc-400">{preset.tagline}</span>
+                  <span className="shrink-0 text-2xl">
+                    {persona.emoji === "" ? "🙂" : persona.emoji}
                   </span>
-                  {draftPersona === preset.id ? (
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium">{persona.name}</span>
+                    <span className="block truncate text-xs text-zinc-400">
+                      {persona.tagline === "" ? `音色 ${persona.voice}` : persona.tagline}
+                    </span>
+                  </span>
+                  {draftPersona === persona.id ? (
                     <span className="shrink-0 text-indigo-500">
                       <CheckIcon />
                     </span>
@@ -328,7 +352,11 @@ export function SettingsSheet({
             <p className="pb-2 text-center text-xs text-zinc-400">{hint}</p>
             <button
               type="button"
-              onClick={() => onApplyPersona(draftPersona)}
+              onClick={() => {
+                // 人格-音色成套:音色取人格记录上绑定的那个(step2 T3)
+                const persona = personas.find((p) => p.id === draftPersona);
+                onApplyPersona(draftPersona, persona?.voice ?? settings.voice);
+              }}
               className="flex h-12 w-full items-center justify-center rounded-xl bg-foreground text-sm font-medium text-background transition-colors hover:opacity-90"
             >
               使用此人格(开启新会话)
