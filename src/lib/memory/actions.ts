@@ -48,13 +48,18 @@ function readStringField(formData: FormData, key: string): string | null {
  * 才能写外键,判断交给 `createConversation` 里的 `isValidPersonaId`。
  *
  * 未配置数据库时退回占位会话(对话仍可用,只是不落库)。
+ *
+ * `to` 字段选择落地 UI(mimic 版拟态球对话页与旧版对话页共用此 Action):
+ * "mimic" → /mimic/chat/<id>,缺省 → /chat/<id>。
  */
 export async function startConversationAction(formData: FormData): Promise<void> {
   const persona = readStringField(formData, "persona");
   const voice = readStringField(formData, "voice");
+  const to = readStringField(formData, "to");
 
   if (!isDatabaseConfigured()) redirect("/chat/local-demo");
   const id = await createConversation({ personaId: persona, persona, voice });
+  if (to === "mimic") redirect(`/mimic/chat/${id}`);
   redirect(`/chat/${id}`);
 }
 

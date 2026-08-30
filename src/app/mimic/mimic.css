@@ -1,0 +1,110 @@
+/**
+ * 拟态球陪伴系统 · 设计 token 与动画（/mimic 路由组专用）。
+ *
+ * 几何与色值全部取自 Ardot 设计稿《Chat Elf 陪伴机器人》
+ * （file id 720464397701019，2026-08-30 经 MCP 逐节点提取），
+ * 与 specCoding/情感陪伴模块/ui-拟态球陪伴系统设计.md §5 的 token 表对齐。
+ *
+ * ⚠️ 本文件不依赖 Tailwind 指令，纯 CSS；颜色一律用设计稿原值。
+ */
+
+.mimic-root {
+  /* 设计稿字体：中文 Noto Sans SC / 英文数字 Inter；离线时回退系统字体 */
+  font-family:
+    "Inter",
+    "Noto Sans SC",
+    -apple-system,
+    "PingFang SC",
+    "HarmonyOS Sans SC",
+    "Microsoft YaHei",
+    system-ui,
+    sans-serif;
+
+  /* morph 缓动：指数缓出（easeOutQuint 近似），无弹簧过冲 —— spec §2 硬规则 */
+  --mimic-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* ---------- 页面进场（180ms 淡入，与球转场并行，spec §4.3） ---------- */
+
+@keyframes mimic-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.mimic-page {
+  animation: mimic-fade-in 180ms ease-out both;
+}
+
+/* 球的浮动/眨眼/呼吸/morph/burst 等动画由 bloub 引擎逐帧驱动
+   （src/components/mimic/ball/engine/），不再使用 CSS 动画。 */
+
+/* ---------- 注册页：失败抖动 ---------- */
+
+@keyframes mimic-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20%,
+  60% {
+    transform: translateX(-6px);
+  }
+  40%,
+  80% {
+    transform: translateX(6px);
+  }
+}
+
+.mimic-shake {
+  animation: mimic-shake 0.4s ease-in-out;
+}
+
+/* ---------- 性格滑块（原生 range 定制，设计稿：轨 6px / 填充 #5645D4 / 白圆钮） ---------- */
+
+.mimic-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 99px;
+  background: linear-gradient(
+    to right,
+    #5645d4 0%,
+    #5645d4 var(--mimic-fill, 50%),
+    #e5e3df var(--mimic-fill, 50%),
+    #e5e3df 100%
+  );
+  outline: none;
+  cursor: pointer;
+  touch-action: pan-y;
+}
+
+.mimic-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: #ffffff;
+  border: 2px solid #5645d4;
+  box-shadow: 0 1px 4px rgb(26 26 26 / 0.18);
+}
+
+.mimic-slider::-moz-range-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: #ffffff;
+  border: 2px solid #5645d4;
+  box-shadow: 0 1px 4px rgb(26 26 26 / 0.18);
+}
+
+.mimic-slider:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px rgb(86 69 212 / 0.25);
+}

@@ -1,0 +1,518 @@
+"use client";
+
+/**
+ * 拟态球对话面板（/mimic/chat/[conversationId] 的客户端主体）。
+ *
+ * 与 src/components/chat/chat-panel.tsx 共用同一条实时链路
+ * (useRealtimeSession → WebRTC → /api/realtime/session → 千问 realtime)，
+ * 差别只在视觉层:球是 bloub 引擎的拟态球,布局按 Ardot 设计稿 §3.3。
+ *
+ * 球态映射(spec §3.3,对接 RealtimeStatus):
+ * - idle/starting/negotiating → idle(空场待机)
+ * - live / user-talking → wide(聆听,麦克风开)
+ * - thinking → thinking(三点脉冲)
+ * - assistant-talking → wink(说话回应)
+ * - 出错(active 中) → alert
+ * - remember_fact 触发时 flash notify(蓝点)
+ *
+ * 持久化与 chat-panel 相同:转写 appendMessagesAction 落库、
+ * 会话结束 finishConversationAction 兜底抽记忆、人格切换 = 开新会话。
+ */
+
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { BallAnchor, useBall } from "@/components/mimic/ball/ball-context";
+import { MessageFeedback } from "@/components/chat/message-feedback";
+import type { BallState } from "@/components/mimic/ball/types";
+import {
+  appendMessagesAction,
+  finishConversationAction,
+  rememberFactAction,
+  switchConversationAction,
+} from "@/lib/memory/actions";
+import { renderPersonaInstructions } from "@/lib/persona/render";
+import { findPersona, resolvePersona } from "@/lib/persona/resolve";
+import type { PersonaRecord } from "@/lib/persona/types";
+import type { PersonaSettings } from "@/lib/persona/settings";
+import { usePersonaSettings } from "@/lib/persona/use-settings";
+import { REMEMBER_FACT_USAGE_HINT, type RealtimeSessionDefaults } from "@/lib/realtime/session-defaults";
+import {
+  useRealtimeSession,
+  type RealtimeStatus,
+  type SeedTranscriptEntry,
+} from "@/lib/realtime/use-realtime-session";
+
+/** RealtimeStatus → 球态(spec §3.3 映射,错误优先) */
+function ballStateOf(status: RealtimeStatus, error: boolean): BallState {
+  if (error) return "alert";
+  switch (status) {
+    case "live":
+    case "user-talking":
+      return "wide";
+    case "thinking":
+      return "thinking";
+    case "assistant-talking":
+      return "wink";
+    default:
+      return "idle";
+  }
+}
+
+const STATUS_TEXT: Record<RealtimeStatus, string> = {
+  idle: "点麦克风开始通话",
+  starting: "请求麦克风…",
+  negotiating: "协商连接中…",
+  live: "在听,请说",
+  "user-talking": "在听你说…",
+  thinking: "想着呢…",
+  "assistant-talking": "在说",
+};
+
+/** 字幕条目(含播种的历史);dbId 落库后回填,有它才能打 👍/👎 */
+interface CaptionEntry {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  dbId?: string;
+  feedback?: 1 | -1 | null;
+}
+
+export function MimicChatPanel({
+  conversationId,
+  sessionDefaults,
+  memoryContext,
+  persistence,
+  initialMessages,
+  personas,
+}: {
+  conversationId: string;
+  sessionDefaults: RealtimeSessionDefaults;
+  /** 服务端组装的记忆上下文(画像 + 召回记忆 + 最近历史) */
+  memoryContext: string;
+  persistence: boolean;
+  initialMessages: readonly SeedTranscriptEntry[];
+  personas: readonly PersonaRecord[];
+}) {
+  const ball = useBall();
+  const router = useRouter();
+  const { settings, update } = usePersonaSettings();
+
+  // 人格 → instructions(客户端渲染,随 session.update 下发);
+  // 展示用的名字/音色走 findPersona(查不到记录时回落渲染人格的名字)
+  const persona = resolvePersona(settings, personas);
+  const personaRecord = findPersona(settings, personas);
+  const instructions = [
+    renderPersonaInstructions(persona),
+    REMEMBER_FACT_USAGE_HINT,
+    memoryContext,
+  ]
+    .filter((part) => part !== "")
+    .join("\n\n");
+
+  // 实时记忆写入:conversationId 走 ref 保持回调稳定
+  const conversationIdRef = useRef(conversationId);
+  useEffect(() => {
+    conversationIdRef.current = conversationId;
+  });
+  const handleRememberFact = useCallback(
+    (fact: { content: string; category: string; importance: number }) => {
+      void rememberFactAction({
+        ...fact,
+        conversationId: persistence ? conversationIdRef.current : null,
+      }).then((added) => {
+        if (added) ball.flash("notify", 1600);
+      });
+    },
+    [persistence, ball],
+  );
+
+  const session = useRealtimeSession({
+    initialHistory: initialMessages,
+    instructions,
+    voice: settings.voice,
+    sessionDefaults,
+    onRememberFact: handleRememberFact,
+  });
+  const { attachMessageId } = session;
+
+  const [mode, setMode] = useState<"company" | "transcript">("company");
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  const active =
+    session.status !== "idle" && session.status !== "starting" && session.status !== "negotiating";
+
+  // 球态跟随实时状态(spec §3.3)
+  const ballState = ballStateOf(session.status, session.error !== null && active);
+  useEffect(() => {
+    ball.setBallState(ballState);
+  }, [ball, ballState]);
+
+  /* ---------------- 持久化(与 chat-panel 相同的双 effect) ---------------- */
+
+  const [persistFailed, setPersistFailed] = useState(false);
+  const persistedCountRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!persistence) return;
+    if (persistedCountRef.current === null) {
+      persistedCountRef.current = session.history.length;
+      return;
+    }
+    const pending = session.history.slice(persistedCountRef.current);
+    if (pending.length === 0) return;
+    persistedCountRef.current = session.history.length;
+    // 服务端过滤空白内容后返回 ids(顺序与过滤后条目一致);这里用同样规则对齐
+    const clean = pending.filter((entry) => entry.text.trim() !== "");
+    void appendMessagesAction(
+      conversationId,
+      pending.map((entry) => ({ role: entry.role, content: entry.text })),
+    ).then((result) => {
+      if (!result.ok) {
+        setPersistFailed(true);
+        return;
+      }
+      // 把 messages.id 挂回字幕条目 —— 有 dbId 的回复才能打 👍/👎
+      result.ids.forEach((messageId, index) => {
+        const entry = clean[index];
+        if (entry !== undefined) attachMessageId(entry.id, messageId);
+      });
+    });
+  }, [session.history, conversationId, persistence, attachMessageId]);
+
+  // 会话从活跃转非活跃:兜底触发记忆抽取
+  const wasActiveRef = useRef(false);
+  useEffect(() => {
+    if (active) {
+      wasActiveRef.current = true;
+      return;
+    }
+    if (!wasActiveRef.current) return;
+    wasActiveRef.current = false;
+    if (persistence) void finishConversationAction(conversationId);
+  }, [active, conversationId, persistence]);
+
+  // 字幕模式自动滚到底
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el !== null) el.scrollTop = el.scrollHeight;
+  }, [session.history, session.userPartial, session.assistantPartial]);
+
+  /**
+   * 人格/音色变更 = 开新会话(realtime 会话不可变参数,voices.ts 硬约束)。
+   * 切换预设沿用 chat-panel 的方案 2:新建 conversation 并跳转。
+   */
+  const stopSession = session.stop;
+  const applySettings = useCallback(
+    (patch: Partial<PersonaSettings>, message: string) => {
+      const next: PersonaSettings = { ...settings, ...patch };
+      update(patch);
+      if (active) stopSession();
+      setSheetOpen(false);
+      void switchConversationAction({
+        personaId: next.personaId,
+        voice: next.voice,
+        fromConversationId: persistence ? conversationId : null,
+      })
+        .then((newId) => {
+          if (newId !== null) router.push(`/mimic/chat/${newId}`);
+          else router.refresh();
+        })
+        .catch(() => {
+          // 无库时设置已进 localStorage,重开通话即生效
+          router.refresh();
+        });
+      void message;
+    },
+    [active, stopSession, update, settings, persistence, conversationId, router],
+  );
+
+  const captions: CaptionEntry[] = session.history.map((entry) => ({
+    id: entry.id,
+    role: entry.role,
+    text: entry.text,
+    ...(entry.dbId === undefined ? {} : { dbId: entry.dbId }),
+    ...(entry.feedback === undefined ? {} : { feedback: entry.feedback }),
+  }));
+
+  // 陪伴模式:字幕 = 最近一轮(user 定稿/流式 + 助手流式/定稿)
+  const lastUser = [...session.history].reverse().find((entry) => entry.role === "user");
+  const elfSpeaking = session.assistantPartial !== "";
+  const elfLast = [...session.history].reverse().find((entry) => entry.role === "assistant");
+  const companyCaption =
+    session.userPartial !== ""
+      ? session.userPartial
+      : lastUser !== undefined
+        ? lastUser.text
+        : active
+          ? ""
+          : null;
+  const companyElf = elfSpeaking
+    ? session.assistantPartial
+    : elfLast !== undefined && lastUser !== undefined && elfLast.id > lastUser.id
+      ? elfLast.text
+      : "";
+
+  return (
+    <div className="mimic-page flex h-dvh flex-col overflow-hidden bg-[#FAFAF9]">
+      {/* 顶栏:H5 只留人格名 + 设置(记忆/历史收进设置抽屉,spec §3.7) */}
+      <header className="flex h-14 shrink-0 items-center justify-between border-b border-[#E5E3DF] bg-white px-4 lg:h-16 lg:px-8">
+        <div className="flex items-center gap-4">
+          <span className="text-base font-semibold text-[#1A1A1A]">{persona.name}</span>
+          <span className="hidden rounded-md bg-[#E6E0F5] px-2.5 py-1 text-xs font-medium text-[#391C57] lg:inline">
+            {persona.name} · {personaRecord?.voice ?? settings.voice ?? "默认音色"}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <Link
+            href="/mimic/memory"
+            className="hidden h-9 items-center rounded-md px-3 text-[13px] font-medium text-[#5D5B54] transition-colors hover:bg-[#F6F5F4] lg:flex"
+          >
+            记忆
+          </Link>
+          <Link
+            href="/mimic/history"
+            className="hidden h-9 items-center rounded-md px-3 text-[13px] font-medium text-[#5D5B54] transition-colors hover:bg-[#F6F5F4] lg:flex"
+          >
+            历史
+          </Link>
+          <button
+            type="button"
+            onClick={() => setSheetOpen(true)}
+            className="flex h-9 items-center rounded-lg bg-[#0A0A0C] px-3 text-[13px] font-medium text-white transition-opacity hover:opacity-85"
+          >
+            设置
+          </button>
+        </div>
+      </header>
+
+      {/* 错误条(对话照常,样式贴设计稿 alert 卡) */}
+      {session.error !== null ? (
+        <div role="alert" className="flex items-start justify-between gap-3 border-b border-[#E03131]/20 bg-[#E03131]/5 px-4 py-2 text-sm text-[#C22525] lg:px-8">
+          <span>{session.error}</span>
+          <button type="button" onClick={session.clearError} className="shrink-0 underline underline-offset-2">
+            知道了
+          </button>
+        </div>
+      ) : null}
+      {persistFailed ? (
+        <p role="status" className="border-b border-[#B7791F]/20 bg-[#B7791F]/5 px-4 py-2 text-xs leading-5 text-[#975A16] lg:px-8">
+          转写未能写入数据库,本次对话不会被记住。请检查 DATABASE_URL 与数据库连接。
+        </p>
+      ) : null}
+
+      {/* 中央舞台 */}
+      <main className="flex flex-1 flex-col items-center justify-center gap-4 overflow-y-auto px-6 py-6 lg:gap-5">
+        {mode === "company" ? (
+          <>
+            <BallAnchor state={ballState} className="h-[200px] w-[200px] lg:h-[280px] lg:w-[280px]" />
+            <p className="text-base font-medium text-[#37352E] lg:text-lg">{STATUS_TEXT[session.status]}</p>
+            <p className="max-w-[520px] text-center text-sm leading-[1.55] text-[#5D5B54] lg:text-base">
+              {companyCaption === null
+                ? "点击下方麦克风,开始和 TA 说话。"
+                : companyCaption === ""
+                  ? "（沉默也是陪伴的一部分）"
+                  : companyCaption}
+            </p>
+            {companyElf !== "" ? (
+              <p className="max-w-[520px] text-center text-sm leading-[1.55] text-[#37352E] lg:text-base">
+                “{companyElf}”
+                {elfSpeaking ? <span className="ml-0.5 animate-pulse">▍</span> : null}
+              </p>
+            ) : null}
+            <p className="hidden text-[13px] text-[#A4A097] lg:block">
+              鼠标跟随转向 · 点击 burst 彩虹 · 思考时裂成三点 · 说话时 wink
+            </p>
+          </>
+        ) : (
+          <div ref={scrollRef} className="flex min-h-0 w-full max-w-[560px] flex-1 flex-col gap-3 overflow-y-auto py-2">
+            {captions.length === 0 && !active ? (
+              <p className="mt-14 text-center text-sm text-[#A4A097]">
+                点击下方麦克风开始通话,说话后此处将显示双方字幕
+              </p>
+            ) : null}
+            {initialMessages.length > 0 ? (
+              <p className="text-center text-xs text-[#A4A097]">以下是此前的对话记录 · 开启通话后继续这场对话</p>
+            ) : null}
+            {captions.map((entry) => (
+              <div key={entry.id} className={`flex flex-col ${entry.role === "user" ? "items-end" : "items-start"}`}>
+                <span className="text-xs text-[#A4A097]">{entry.role === "user" ? "你" : persona.name}</span>
+                <span
+                  className={`max-w-[85%] rounded-xl px-4 py-2.5 text-sm leading-[1.55] ${
+                    entry.role === "user"
+                      ? "bg-[#0A0A0C] text-white"
+                      : "border border-[#E5E3DF] bg-white text-[#1A1A1A]"
+                  }`}
+                >
+                  {entry.text}
+                </span>
+                {/* 反馈只对 TA 的回复开放,且要等这条落库拿到 message id 之后(step2 T4) */}
+                {entry.role === "assistant" && entry.dbId !== undefined ? (
+                  <MessageFeedback messageId={entry.dbId} initialScore={entry.feedback ?? null} />
+                ) : null}
+              </div>
+            ))}
+            {session.userPartial !== "" ? (
+              <div className="flex flex-col items-end gap-1">
+                <span className="text-xs text-[#A4A097]">你</span>
+                <span className="max-w-[85%] rounded-xl bg-[#0A0A0C]/60 px-4 py-2.5 text-sm italic leading-[1.55] text-white/80">
+                  {session.userPartial}
+                  <span className="ml-0.5 animate-pulse">▍</span>
+                </span>
+              </div>
+            ) : null}
+            {session.assistantPartial !== "" ? (
+              <div className="flex flex-col items-start gap-1">
+                <span className="text-xs text-[#A4A097]">{persona.name}</span>
+                <span className="max-w-[85%] rounded-xl border border-[#E5E3DF] bg-white/60 px-4 py-2.5 text-sm italic leading-[1.55] text-[#5D5B54]">
+                  {session.assistantPartial}
+                  <span className="ml-0.5 animate-pulse">▍</span>
+                </span>
+              </div>
+            ) : null}
+          </div>
+        )}
+      </main>
+
+      {/* 底部控制条 */}
+      <footer className="flex h-[76px] shrink-0 items-center justify-between border-t border-[#E5E3DF] bg-white px-5 pb-[max(0px,env(safe-area-inset-bottom))] lg:h-[88px] lg:px-12">
+        <button
+          type="button"
+          onClick={() => setMode(mode === "company" ? "transcript" : "company")}
+          className="flex h-11 items-center gap-1 rounded-lg bg-[#F6F5F4] p-1"
+          aria-label="切换陪伴/字幕模式"
+        >
+          <span
+            className={`flex h-9 items-center rounded-md px-3.5 text-[13px] font-medium transition-colors ${
+              mode === "company" ? "bg-[#0A0A0C] text-white" : "text-[#5D5B54]"
+            }`}
+          >
+            陪伴
+          </span>
+          <span
+            className={`hidden h-9 items-center rounded-md px-3.5 text-[13px] font-medium transition-colors lg:flex ${
+              mode === "transcript" ? "bg-[#0A0A0C] text-white" : "text-[#5D5B54]"
+            }`}
+          >
+            字幕
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={session.toggle}
+          disabled={session.status === "starting" || session.status === "negotiating"}
+          aria-label={active ? "结束通话" : "开始通话"}
+          className={`flex h-14 w-14 items-center justify-center rounded-full text-white transition-colors disabled:cursor-not-allowed disabled:opacity-50 lg:h-16 lg:w-16 ${
+            active ? "bg-[#5645D4] hover:bg-[#4536A8]" : "bg-[#C8C4BE] hover:bg-[#B5B1AA]"
+          }`}
+        >
+          <svg viewBox="0 0 24 24" className="h-6 w-6" fill="currentColor" aria-hidden>
+            {active ? (
+              <path d="M4 20 20 4M15 5l4 4M9 4 4 9m8 2.5a3.5 3.5 0 0 1-1 2.46A3.5 3.5 0 0 1 5 11m14 0a7 7 0 0 1-10.5 6.07A7 7 0 0 1 5 11" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" />
+            ) : (
+              <path d="M12 15a4 4 0 0 0 4-4V6a4 4 0 1 0-8 0v5a4 4 0 0 0 4 4Zm6-4a6 6 0 0 1-12 0H4a8 8 0 0 0 7 7.93V22h2v-3.07A8 8 0 0 0 20 11h-2Z" />
+            )}
+          </svg>
+        </button>
+
+        <button
+          type="button"
+          onClick={session.stop}
+          className="hidden h-11 items-center rounded-lg border border-[#C8C4BE] px-4.5 text-sm font-medium text-[#1A1A1A] transition-colors hover:border-[#A4A097] lg:flex"
+        >
+          结束通话
+        </button>
+        <button
+          type="button"
+          onClick={session.stop}
+          className="flex h-11 items-center px-2 text-[13px] font-medium text-[#5D5B54] lg:hidden"
+        >
+          结束
+        </button>
+      </footer>
+
+      {/* 设置抽屉(H5 全屏 / 桌面右侧面板;预设切换 = 开新会话) */}
+      {sheetOpen && (
+        <div className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label="设置">
+          <button
+            type="button"
+            aria-label="关闭设置"
+            className="absolute inset-0 bg-black/30"
+            onClick={() => setSheetOpen(false)}
+          />
+          <div className="absolute inset-y-0 right-0 flex w-full max-w-[380px] flex-col gap-1 overflow-y-auto bg-white p-5 shadow-2xl">
+            <div className="flex items-center justify-between pb-3">
+              <span className="text-base font-semibold text-[#1A1A1A]">设置</span>
+              <button
+                type="button"
+                onClick={() => setSheetOpen(false)}
+                className="flex h-11 w-11 items-center justify-center rounded-md text-xl text-[#5D5B54] hover:bg-[#F6F5F4]"
+                aria-label="关闭"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="rounded-xl bg-[#E6E0F5] p-4">
+              <p className="text-sm font-semibold text-[#391C57]">
+                {persona.name} · {personaRecord?.voice ?? settings.voice ?? "默认音色"}
+              </p>
+              <p className="mt-1 text-[13px] leading-[1.5] text-[#5D5B54]">
+                {personaRecord?.tagline ?? persona.backstory.slice(0, 40)}
+              </p>
+            </div>
+
+            {/* 预设人格切换 */}
+            <p className="mt-3 px-1 text-xs font-semibold text-[#787671]">换一个 TA(将开启新会话)</p>
+            {personas.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() =>
+                  p.id === settings.personaId
+                    ? undefined
+                    : applySettings({ personaId: p.id, voice: p.voice }, `已切换到「${p.name}」`)
+                }
+                className={`flex min-h-[56px] items-center justify-between rounded-xl px-4 text-sm font-medium transition-colors hover:bg-[#F6F5F4] ${
+                  p.id === settings.personaId ? "text-[#5645D4]" : "text-[#37352E]"
+                }`}
+              >
+                {p.name}
+                {p.id === settings.personaId ? <span className="text-xs text-[#A4A097]">当前</span> : <span className="text-[#A4A097]">›</span>}
+              </button>
+            ))}
+
+            <SheetLink href="/mimic/persona" label="TA 是谁 · 人格与音色" />
+            <SheetLink href="/mimic/memory" label="TA 记得什么 · 记忆" />
+            <SheetLink href="/mimic/history" label="历史会话" />
+
+            <div className="mt-2 flex flex-col gap-1 rounded-xl border border-[#E5E3DF] p-4 opacity-55">
+              <p className="text-sm font-medium text-[#37352E]">偏好与安全</p>
+              <p className="text-xs text-[#A4A097]">防沉迷提醒 · 未成年人模式(未开通)</p>
+            </div>
+            {!persistence ? (
+              <div className="flex flex-col gap-1 rounded-xl border border-[#B7791F]/30 bg-[#B7791F]/5 p-4">
+                <p className="text-sm font-medium text-[#37352E]">数据</p>
+                <p className="text-xs text-[#975A16]">未配置 DATABASE_URL,会话不落库、无历史与记忆。</p>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SheetLink({ href, label }: { href: string; label: string }) {
+  return (
+    <Link
+      href={href}
+      className="flex min-h-[56px] items-center justify-between rounded-xl px-4 text-sm font-medium text-[#37352E] transition-colors hover:bg-[#F6F5F4]"
+    >
+      {label}
+      <span className="text-[#A4A097]">›</span>
+    </Link>
+  );
+}
