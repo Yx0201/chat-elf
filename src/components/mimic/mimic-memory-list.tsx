@@ -163,7 +163,7 @@ export function MimicMemoryList({
       <section className="mx-auto flex w-full max-w-[1000px] flex-col gap-4 px-4 py-6 lg:gap-4 lg:px-12 lg:py-10">
         <header className="flex items-baseline justify-between">
           <h2 className="text-xl font-semibold text-[#1A1A1A] lg:text-[22px]">在你眼中</h2>
-          <Link href="/mimic/chat" className="text-[13px] font-medium text-[#0075DE] hover:text-[#4536A8]">
+          <Link href="/chat" className="text-[13px] font-medium text-[#0075DE] hover:text-[#4536A8]">
             ← 回到对话
           </Link>
         </header>

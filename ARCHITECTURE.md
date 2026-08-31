@@ -162,7 +162,7 @@ DashScope WebRTC 信令端点形态（以官方文档为准）：
 - 打断处理（barge-in）：监听 `input_audio_buffer.speech_started` 事件——客户端对本地播放做音量淡出后重挂流（清空残余缓冲）并更新 UI 状态；同时对 in-flight 响应显式发送 `response.cancel`（文档唯一保证的取消手段），确保服务端停止生成旧答案
 - 开启输入音频转写（用户语音→文字字幕），输出侧消费 `response.audio_transcript.delta/done` 作为助手字幕
 - `session.update` **发两次**（2026-08-30 起）：第一条承载 modalities / voice / instructions / turn_detection 等核心配置，第二条只带 `tools`（Function Calling）。拆开发是为了隔离风险 —— 工具注册若被服务端拒绝，核心配置已生效、对话照常。细节见「Function Calling」。
-- `voice` 与 `instructions` 都**只在建连时（第一次 `session.update`）生效**，会话中无法修改 → **切换人格或音色 = 开新会话**。UI 必须明示这一点：变更即结束当前通话并以 toast 告知（`src/components/chat/settings-sheet.tsx`）。
+- `voice` 与 `instructions` 都**只在建连时（第一次 `session.update`）生效**，会话中无法修改。**2026-08-31 UI 大一统（step6）起产品语义升级**：人格与音色在**孵化时一次性定格**（`/hatch`，localStorage `chat-elf:hatched`），此后不提供任何切换入口 —— 对话页设置抽屉只展示锁定说明与 记忆/历史/人格库 入口。数据层的 `switchConversationAction`（换参数=开新会话）保留，供孵化确认这一唯一调用点使用。
 - `voice` 取值见「接入通道双轨制」的音色清单。`instructions` 由**人格模板 + 语音播报约束 + 不可覆盖的安全段**拼接（`src/lib/persona/presets.ts`）；安全段含 AI 身份披露与"不扮演心理/医疗专业人士"，人格自定义无法覆盖它 —— 合规要求必须从第一期就埋进架构，不能后补。
 - 韵律启发式（`src/lib/realtime/mood.ts`）的基频/能量阈值是按 dashscope 通道的 **Tina** 音色标定的。当前默认通道是 tokenplan（音色 `longanqian`），标定并不适用 → 非 Tina 音色一律**跳过韵律层**，表情退化为 ASR 原生 emotion + 流式文本词典两层（由 `PROSODY_CALIBRATED_VOICE` 门控，见 `use-realtime-session.ts`）。
 
@@ -207,23 +207,39 @@ DATABASE_URL=postgres://…           # 本地 PG / 上线 Neon（服务端专�
 # Auth 的候选项，与存储层解耦。NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY 已废弃移除。
 ```
 
-## 目标目录结构【2026-08-29 已实施】
+## 目标目录结构【2026-08-29 已实施 · 2026-08-31 UI 大一统更新】
+
+> 2026-08-31 UI 大一统（step6）后：拟态球界面升为**唯一 UI**（根路由），旧白底版
+> 页面与组件（chat-panel / settings-sheet / elf-avatar / 首页历史列表 / 旧 memory 页）全部删除。
+> `/mimic/*` 旧预览路由 308 重定向到下述新落点。主路径：`/`（登录）→ `/hatch`（一次性孵化）→ `/chat`。
 
 ```text
 src/
   app/
-    page.tsx                        # 首页：开始新会话 + 历史会话列表（Server Component 直取）
-    chat/[conversationId]/page.tsx  # 对话页（Server Component，组装 memoryContext 注入客户端）
-    persona/page.tsx                # 人格库（step2）
+    page.tsx                        # 登录页（纯 UI；已孵化→/chat，未孵化→/hatch）
+    hatch/page.tsx                  # 孵化页（egg→burst→一次性人格/音色定格，服务端壳注入自建人格）
+    chat/page.tsx                   # 对话入口（重定向到最近会话或新建表单）
+    chat/[conversationId]/page.tsx  # 对话页（Server Component，组装 memoryContext 注入 MimicChatPanel）
+    history/page.tsx                # 历史会话（comet 球 + 列表 + 两步确认删除）
+    persona/page.tsx                # 人格库（拟态球化；只管理定义，陪伴人格锁定）
     persona/new/page.tsx            # 新建人格（静态段优先于 [personaId]）
-    persona/[personaId]/page.tsx    # 编辑人格（预设只读 + 另存副本）
-    memory/page.tsx                 # 「TA 记得你」记忆可视化页（step3）
+    persona/[personaId]/page.tsx    # 编辑人格（预设/陪伴人格只读 + 另存副本）
+    memory/page.tsx                 # 「TA 记得你」记忆可视化页（notify 球 + 画像卡）
+    language/page.tsx               # 拟态球交互语言说明页（登录页入口）
+    mimic.css                       # 拟态球设计 token 与动画（根布局全局引入，原 /mimic 专用）
     api/
       realtime/session/route.ts     # WebRTC SDP 信令转发（核心，Node runtime）
   components/
-    chat/                           # 表情球、字幕、控制条、设置抽屉、删除按钮、消息反馈
-    persona/                        # 人格编辑器、人格列表、页面 header（step2）
-    memory/memory-list.tsx          # 记忆列表 + 画像卡（step3）
+    chat/
+      message-feedback.tsx          # 👍/👎 埋点（对话面板复用）
+    mimic/
+      ball/                         # 拟态球：ball-context（常驻层）/ mimic-ball（rAF 驱动器）/ engine（bloub 移植）
+      hatch-flow.tsx                # 孵化两阶段流程（egg → 一次性定格）
+      mimic-chat-panel.tsx          # 唯一对话面板（球态映射 + 字幕 + 锁定抽屉）
+      mimic-history-list.tsx        # 历史列表（orbit 转场 + 删除）
+      mimic-memory-list.tsx         # 记忆列表（wink/sleep 交互 + 物理删除）
+      mimic-new-conversation-form.tsx
+    persona/                        # 人格编辑器、人格列表、页面 header（拟态球化）
   lib/
     ai/provider.ts                  # AI SDK provider（DashScope OpenAI 兼容模式）
     db/
@@ -244,12 +260,13 @@ src/
       presets.ts                    # 人格预设 + 播报约束 + 不可覆盖安全段
       voices.ts                     # 系统音色清单 + 韵律标定音色常量
       traits.ts                     # 人格矩阵维度定义 + zod schema + 解析
-      render.ts                     # 人格 → instructions 渲染器（编辑器预览同源）
+      render.ts                     # 人格 → instructions 渲染器（编辑器/孵化预览同源）
       repository.ts                 # personas 表读写（服务端）
       types.ts                      # 类型与纯常量（**不得 import 服务端模块**，见下）
       resolve.ts                    # localStorage 里的 personaId → 可渲染人格（纯函数）
       settings.ts                   # localStorage 持久化（前缀 chat-elf:）
       use-settings.ts               # useSyncExternalStore 订阅
+      hatch-state.ts                # 一次性孵化标记（chat-elf:hatched；账号体系后归 user 层）
     realtime/
       use-realtime-session.ts       # 封装 RTCPeerConnection + DataChannel 状态机
       events.ts                     # Realtime 事件的 discriminated union 类型

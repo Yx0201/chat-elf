@@ -19,7 +19,6 @@ import {
 
 function revalidatePersona(): void {
   revalidatePath("/persona");
-  revalidatePath("/");
 }
 
 export interface SavePersonaInput {

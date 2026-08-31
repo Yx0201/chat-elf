@@ -42,24 +42,21 @@ function readStringField(formData: FormData, key: string): string | null {
  * 新建会话并跳转。
  *
  * persona / voice 由客户端表单传入 —— 它们当前只存在 localStorage,服务端读不到,
- * 不传的话历史列表就显示不出人格名(方案 1:首页按钮改为客户端组件读取后提交)。
+ * 不传的话历史列表就显示不出人格名。
  *
  * step2 起 persona 的值域是「预设 archetype 或 personas 表 uuid」。只有后者
  * 才能写外键,判断交给 `createConversation` 里的 `isValidPersonaId`。
  *
  * 未配置数据库时退回占位会话(对话仍可用,只是不落库)。
  *
- * `to` 字段选择落地 UI(mimic 版拟态球对话页与旧版对话页共用此 Action):
- * "mimic" → /mimic/chat/<id>,缺省 → /chat/<id>。
+ * 2026-08-31 UI 大一统后落点唯一:/chat/<id>(拟态球对话页)。
  */
 export async function startConversationAction(formData: FormData): Promise<void> {
   const persona = readStringField(formData, "persona");
   const voice = readStringField(formData, "voice");
-  const to = readStringField(formData, "to");
 
   if (!isDatabaseConfigured()) redirect("/chat/local-demo");
   const id = await createConversation({ personaId: persona, persona, voice });
-  if (to === "mimic") redirect(`/mimic/chat/${id}`);
   redirect(`/chat/${id}`);
 }
 
@@ -93,7 +90,7 @@ export async function switchConversationAction(input: {
     persona: input.personaId,
     voice: input.voice,
   });
-  revalidatePath("/");
+  revalidatePath("/history");
   return id;
 }
 
@@ -173,7 +170,7 @@ export async function finishConversationAction(conversationId: string): Promise<
 export async function deleteConversationAction(conversationId: string): Promise<void> {
   if (!isDatabaseConfigured() || !isValidConversationId(conversationId)) return;
   await deleteConversation(conversationId);
-  revalidatePath("/");
+  revalidatePath("/history");
 }
 
 /**

@@ -1,16 +1,19 @@
 /**
- * 记忆可视化页 `/memory`(step3 T5「TA 记得你」)。
+ * 04 记忆列表 · 服务端壳(2026-08-31 起为唯一记忆页,接真实 memories 表 +
+ * user_profile 画像;step3 T5「TA 记得你」,同时是合规基础:用户可看见并删除)。
  *
- * 存在的理由不只是"透明":Replika memory editor 模式把它当作**合规基础能力** ——
- * 用户看得见 AI 记住了什么、能删掉,才谈得上对个人信息有控制权。
- * 因此这一页也让画像(更凝练、信息密度更高)一并可见。
+ * 桌面:左 440px 深色舞台(notify 球 200px 浅体深眼 + 蓝点),
+ * 右列表区(页头 + 画像卡 + 分组 + 记忆条目)。H5:舞台压缩在顶部、列表全宽。
+ *
+ * 交互(spec §3.4,在客户端组件 MimicMemoryList):
+ * - 点某条记忆 → 球 wink 一下再转回 notify(「我想起这个了」);
+ * - 删除一条(deleteMemoryAction 物理删除)→ 球 sleep 一下再弹回 + refresh。
  */
 
-import { MemoryList } from "@/components/memory/memory-list";
-import { PersonaPageHeader } from "@/components/persona/persona-page-header";
+import { MimicMemoryList } from "@/components/mimic/mimic-memory-list";
 import { isDatabaseConfigured } from "@/lib/db/client";
 import { getProfile } from "@/lib/memory/profile";
-import { listMemories } from "@/lib/memory/store";
+import { listMemories, type MemoryListItem } from "@/lib/memory/store";
 
 // 记忆会被删除、画像会被重写,不能静态化
 export const dynamic = "force-dynamic";
@@ -19,32 +22,13 @@ export default async function MemoryPage() {
   const persistence = isDatabaseConfigured();
   const [memories, profile] = persistence
     ? await Promise.all([listMemories(), getProfile()])
-    : [null, null];
+    : [[], null];
 
   return (
-    <div className="text-foreground mx-auto w-full max-w-xl px-5 py-8 sm:py-12 md:max-w-2xl">
-      <PersonaPageHeader title="TA 记得你" backHref="/" />
-
-      <p className="mt-4 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
-        下面是 TA 从你们的对话里记住的事。删掉一条,TA 就会真的忘掉它。
-      </p>
-
-      {!persistence ? (
-        <p className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-400">
-          未配置 DATABASE_URL,记忆功能不可用。在 .env.local 中补上即可(参考 .env.example)。
-        </p>
-      ) : null}
-
-      <div className="mt-8 pb-8">
-        {memories === null ? null : (
-          <MemoryList
-            memories={memories}
-            profileSummary={profile?.summary ?? ""}
-            profileTraits={profile?.traits ?? {}}
-            profileRefreshedAt={profile?.refreshedAt?.toISOString() ?? null}
-          />
-        )}
-      </div>
-    </div>
+    <MimicMemoryList
+      memories={memories satisfies MemoryListItem[]}
+      profileSummary={profile?.summary ?? ""}
+      persistence={persistence}
+    />
   );
 }

@@ -1,16 +1,16 @@
 "use client";
 
 /**
- * 历史列表客户端主体(拟态球 comet/orbit 交互 + 真实会话数据)。
+ * 历史列表客户端主体(拟态球 comet/orbit 交互 + 真实会话数据 + 删除)。
  *
  * 会话列表由服务端直取注入;本组件只做:彗尾跟手、点进对话的 orbit 转场、
- * 新开一场(带上 localStorage 的人格/音色,startConversationAction to=mimic)。
+ * 新开一场(带上 localStorage 的人格/音色)、删除会话(两次确认,物理删除)。
  */
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { BallAnchor, useBall } from "@/components/mimic/ball/ball-context";
-import { startConversationAction } from "@/lib/memory/actions";
+import { deleteConversationAction, startConversationAction } from "@/lib/memory/actions";
 import { usePersonaSettings } from "@/lib/persona/use-settings";
 
 export interface HistorySession {
@@ -44,6 +44,8 @@ export function MimicHistoryList({
   const ball = useBall();
   const { settings } = usePersonaSettings();
   const [entering, setEntering] = useState(false);
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   // 滚动 → 彗尾相位(±14° 跟随滚动条位置)
   useEffect(() => {
@@ -64,13 +66,23 @@ export function MimicHistoryList({
     };
   }, [ball]);
 
-  /** 点进一场:球 orbit 转场后路由进 /mimic/chat/<id>(spec §3.5) */
+  /** 点进一场:球 orbit 转场后路由进 /chat/<id>(spec §3.5) */
   function enterChat(conversationId: string): void {
-    if (entering) return;
+    if (entering || confirmingId !== null) return;
     setEntering(true);
     ball.setTilt(0);
     ball.flash("orbit", 700);
-    setTimeout(() => router.push(`/mimic/chat/${conversationId}`), 650);
+    setTimeout(() => router.push(`/chat/${conversationId}`), 650);
+  }
+
+  async function handleDelete(id: string): Promise<void> {
+    setConfirmingId(null);
+    setDeletingId(id);
+    await deleteConversationAction(id);
+    // 删除的是硬约束语义"彻底删掉":球 sleep 一下再回弹,列表刷新
+    ball.flash("sleep", 800);
+    router.refresh();
+    setDeletingId(null);
   }
 
   return (
@@ -81,7 +93,6 @@ export function MimicHistoryList({
         <form action={startConversationAction}>
           <input type="hidden" name="persona" value={settings.personaId} />
           <input type="hidden" name="voice" value={settings.voice ?? ""} />
-          <input type="hidden" name="to" value="mimic" />
           <button
             type="submit"
             disabled={entering}
@@ -97,8 +108,8 @@ export function MimicHistoryList({
         <section className="flex flex-col items-center justify-center gap-3 bg-[#F8F5E8] px-6 py-10 lg:min-h-[calc(100dvh-64px)] lg:w-[420px] lg:shrink-0 lg:gap-4">
           <BallAnchor state="comet" className="h-40 w-40 lg:h-[200px] lg:w-[200px]" />
           <h1 className="text-xl font-semibold text-[#1A1A1A] lg:text-2xl">穿过旧日子</h1>
-          <p className="max-w-[300px] text-center text-[13px] leading-[1.5] text-[#5D5B54] lg:text-sm">
-            滚动列表时彗尾跟着走;点进一场对话,球体 orbit 转场回到聆听。
+          <p className="max-w-[300px] text-center text-[13px] leading-[1.6] text-[#5D5B54] lg:text-sm">
+            滚动列表时彗尾跟着走;点进一场对话,球体 orbit 转场回到聆听。删除会连转写一起删掉。
           </p>
         </section>
 
@@ -116,28 +127,63 @@ export function MimicHistoryList({
             </div>
           ) : (
             sessions.map((s) => (
-              <button
+              <div
                 key={s.id}
-                type="button"
-                onClick={() => enterChat(s.id)}
-                className="flex min-h-[64px] items-center justify-between gap-3 rounded-xl border border-[#E5E3DF] bg-white px-4 py-3 text-left transition-colors hover:border-[#C8C4BE]"
+                className={`flex items-center gap-2 rounded-xl border border-[#E5E3DF] bg-white pl-4 pr-2 transition-colors hover:border-[#C8C4BE] ${
+                  deletingId === s.id ? "opacity-50" : ""
+                }`}
               >
-                <div className="flex flex-col gap-1">
-                  <p className="text-sm font-medium text-[#1A1A1A]">
-                    {s.title === "" ? "未命名会话" : s.title}
-                  </p>
-                  <p className="text-xs text-[#A4A097]">
-                    {[
-                      formatWhen(s.createdAt),
-                      `${s.messageCount} 条`,
-                      s.personaName,
-                    ]
-                      .filter((part) => part !== null)
-                      .join(" · ")}
-                  </p>
-                </div>
-                <span className="shrink-0 font-['Inter'] text-lg font-medium text-[#787671]">→</span>
-              </button>
+                <button
+                  type="button"
+                  onClick={() => enterChat(s.id)}
+                  className="flex min-h-[64px] min-w-0 flex-1 items-center justify-between gap-3 py-3 text-left"
+                >
+                  <span className="flex min-w-0 flex-col gap-1">
+                    <span className="truncate text-sm font-medium text-[#1A1A1A]">
+                      {s.title === "" ? "未命名会话" : s.title}
+                    </span>
+                    <span className="truncate text-xs text-[#A4A097]">
+                      {[
+                        formatWhen(s.createdAt),
+                        `${s.messageCount} 条`,
+                        s.personaName,
+                      ]
+                        .filter((part) => part !== null)
+                        .join(" · ")}
+                    </span>
+                  </span>
+                  <span className="shrink-0 font-['Inter'] text-lg font-medium text-[#787671]">→</span>
+                </button>
+
+                {confirmingId === s.id ? (
+                  <span className="flex shrink-0 items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => void handleDelete(s.id)}
+                      disabled={deletingId !== null}
+                      className="h-11 rounded-lg bg-[#E03131] px-3 text-[13px] font-medium text-white"
+                    >
+                      确认删除
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmingId(null)}
+                      className="h-11 rounded-lg border border-[#E5E3DF] px-3 text-[13px] font-medium text-[#5D5B54]"
+                    >
+                      取消
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmingId(s.id)}
+                    aria-label={`删除会话 ${s.title === "" ? "未命名会话" : s.title}`}
+                    className="flex h-11 shrink-0 items-center px-2 text-[13px] font-medium text-[#E03131] transition-colors hover:text-[#C22525]"
+                  >
+                    删除
+                  </button>
+                )}
+              </div>
             ))
           )}
 

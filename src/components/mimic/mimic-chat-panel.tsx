@@ -1,11 +1,10 @@
 "use client";
 
 /**
- * 拟态球对话面板（/mimic/chat/[conversationId] 的客户端主体）。
+ * 拟态球对话面板(/chat/[conversationId] 的客户端主体,2026-08-31 起为唯一对话 UI)。
  *
- * 与 src/components/chat/chat-panel.tsx 共用同一条实时链路
- * (useRealtimeSession → WebRTC → /api/realtime/session → 千问 realtime)，
- * 差别只在视觉层:球是 bloub 引擎的拟态球,布局按 Ardot 设计稿 §3.3。
+ * 实时链路:useRealtimeSession → WebRTC → /api/realtime/session → 千问 realtime;
+ * 布局按 Ardot 设计稿 §3.3,球是 bloub 引擎的拟态球。
  *
  * 球态映射(spec §3.3,对接 RealtimeStatus):
  * - idle/starting/negotiating → idle(空场待机)
@@ -15,12 +14,14 @@
  * - 出错(active 中) → alert
  * - remember_fact 触发时 flash notify(蓝点)
  *
- * 持久化与 chat-panel 相同:转写 appendMessagesAction 落库、
- * 会话结束 finishConversationAction 兜底抽记忆、人格切换 = 开新会话。
+ * 人格 / 音色在**孵化时一次性定格**(见 /hatch),本页不再提供切换;
+ * 设置抽屉只保留 记忆/历史/人格库 入口。
+ *
+ * 持久化:转写 appendMessagesAction 落库、会话结束 finishConversationAction
+ * 兜底抽记忆。
  */
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { BallAnchor, useBall } from "@/components/mimic/ball/ball-context";
 import { MessageFeedback } from "@/components/chat/message-feedback";
@@ -29,12 +30,10 @@ import {
   appendMessagesAction,
   finishConversationAction,
   rememberFactAction,
-  switchConversationAction,
 } from "@/lib/memory/actions";
 import { renderPersonaInstructions } from "@/lib/persona/render";
 import { findPersona, resolvePersona } from "@/lib/persona/resolve";
 import type { PersonaRecord } from "@/lib/persona/types";
-import type { PersonaSettings } from "@/lib/persona/settings";
 import { usePersonaSettings } from "@/lib/persona/use-settings";
 import { REMEMBER_FACT_USAGE_HINT, type RealtimeSessionDefaults } from "@/lib/realtime/session-defaults";
 import {
@@ -95,8 +94,7 @@ export function MimicChatPanel({
   personas: readonly PersonaRecord[];
 }) {
   const ball = useBall();
-  const router = useRouter();
-  const { settings, update } = usePersonaSettings();
+  const { settings } = usePersonaSettings();
 
   // 人格 → instructions(客户端渲染,随 session.update 下发);
   // 展示用的名字/音色走 findPersona(查不到记录时回落渲染人格的名字)
@@ -149,7 +147,7 @@ export function MimicChatPanel({
     ball.setBallState(ballState);
   }, [ball, ballState]);
 
-  /* ---------------- 持久化(与 chat-panel 相同的双 effect) ---------------- */
+  /* ---------------- 持久化(转写落库 + 会话结束兜底抽取) ---------------- */
 
   const [persistFailed, setPersistFailed] = useState(false);
   const persistedCountRef = useRef<number | null>(null);
@@ -199,35 +197,6 @@ export function MimicChatPanel({
     if (el !== null) el.scrollTop = el.scrollHeight;
   }, [session.history, session.userPartial, session.assistantPartial]);
 
-  /**
-   * 人格/音色变更 = 开新会话(realtime 会话不可变参数,voices.ts 硬约束)。
-   * 切换预设沿用 chat-panel 的方案 2:新建 conversation 并跳转。
-   */
-  const stopSession = session.stop;
-  const applySettings = useCallback(
-    (patch: Partial<PersonaSettings>, message: string) => {
-      const next: PersonaSettings = { ...settings, ...patch };
-      update(patch);
-      if (active) stopSession();
-      setSheetOpen(false);
-      void switchConversationAction({
-        personaId: next.personaId,
-        voice: next.voice,
-        fromConversationId: persistence ? conversationId : null,
-      })
-        .then((newId) => {
-          if (newId !== null) router.push(`/mimic/chat/${newId}`);
-          else router.refresh();
-        })
-        .catch(() => {
-          // 无库时设置已进 localStorage,重开通话即生效
-          router.refresh();
-        });
-      void message;
-    },
-    [active, stopSession, update, settings, persistence, conversationId, router],
-  );
-
   const captions: CaptionEntry[] = session.history.map((entry) => ({
     id: entry.id,
     role: entry.role,
@@ -266,13 +235,13 @@ export function MimicChatPanel({
         </div>
         <div className="flex items-center gap-2">
           <Link
-            href="/mimic/memory"
+            href="/memory"
             className="hidden h-9 items-center rounded-md px-3 text-[13px] font-medium text-[#5D5B54] transition-colors hover:bg-[#F6F5F4] lg:flex"
           >
             记忆
           </Link>
           <Link
-            href="/mimic/history"
+            href="/history"
             className="hidden h-9 items-center rounded-md px-3 text-[13px] font-medium text-[#5D5B54] transition-colors hover:bg-[#F6F5F4] lg:flex"
           >
             历史
@@ -391,7 +360,7 @@ export function MimicChatPanel({
             陪伴
           </span>
           <span
-            className={`hidden h-9 items-center rounded-md px-3.5 text-[13px] font-medium transition-colors lg:flex ${
+            className={`flex h-9 items-center rounded-md px-3.5 text-[13px] font-medium transition-colors ${
               mode === "transcript" ? "bg-[#0A0A0C] text-white" : "text-[#5D5B54]"
             }`}
           >
@@ -462,31 +431,14 @@ export function MimicChatPanel({
               <p className="mt-1 text-[13px] leading-[1.5] text-[#5D5B54]">
                 {personaRecord?.tagline ?? persona.backstory.slice(0, 40)}
               </p>
+              <p className="mt-2 text-xs leading-[1.5] text-[#787671]">
+                人格与音色在孵化时一次性确定,不可修改。TA 就是每天陪你说话的那个角色。
+              </p>
             </div>
 
-            {/* 预设人格切换 */}
-            <p className="mt-3 px-1 text-xs font-semibold text-[#787671]">换一个 TA(将开启新会话)</p>
-            {personas.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() =>
-                  p.id === settings.personaId
-                    ? undefined
-                    : applySettings({ personaId: p.id, voice: p.voice }, `已切换到「${p.name}」`)
-                }
-                className={`flex min-h-[56px] items-center justify-between rounded-xl px-4 text-sm font-medium transition-colors hover:bg-[#F6F5F4] ${
-                  p.id === settings.personaId ? "text-[#5645D4]" : "text-[#37352E]"
-                }`}
-              >
-                {p.name}
-                {p.id === settings.personaId ? <span className="text-xs text-[#A4A097]">当前</span> : <span className="text-[#A4A097]">›</span>}
-              </button>
-            ))}
-
-            <SheetLink href="/mimic/persona" label="TA 是谁 · 人格与音色" />
-            <SheetLink href="/mimic/memory" label="TA 记得什么 · 记忆" />
-            <SheetLink href="/mimic/history" label="历史会话" />
+            <SheetLink href="/persona" label="人格库 · 看 TA 与其它人格" />
+            <SheetLink href="/memory" label="TA 记得什么 · 记忆" />
+            <SheetLink href="/history" label="历史会话" />
 
             <div className="mt-2 flex flex-col gap-1 rounded-xl border border-[#E5E3DF] p-4 opacity-55">
               <p className="text-sm font-medium text-[#37352E]">偏好与安全</p>

@@ -1,9 +1,11 @@
 /**
- * 人格列表页 `/persona`(step2 T3)。
+ * 人格列表页 `/persona`(step2 T3;2026-08-31 拟态球化)。
  *
- * 路由而非抽屉二级页 —— 用户决策项 2 的选定方案:内容量大(6 滑块 + 2 textarea +
- * 预览),挤在窄屏抽屉里体验很差。ui spec §2 也允许"内容量大的页面升级为独立路由",
- * H5 与桌面共用路由,仅靠响应式断点区分布局。
+ * 路由而非抽屉二级页 —— 内容量大(编辑器 6 滑块 + 2 textarea + 预览),
+ * 挤在窄屏抽屉里体验很差(ui spec §2 允许内容量大的页面升级为独立路由)。
+ *
+ * 与"换人格"相关的旧语义已移除:陪伴人格在孵化时一次性定格,
+ * 本页只管理人格**定义**(预设只读,自建可编辑)。
  */
 
 import Link from "next/link";
@@ -22,32 +24,34 @@ export default async function PersonaPage() {
   const customs = all.filter((persona) => !persona.isPreset);
 
   return (
-    <div className="text-foreground mx-auto w-full max-w-xl px-5 py-8 sm:py-12 md:max-w-2xl">
-      <PersonaPageHeader title="人格" backHref="/">
-        {persistence ? (
-          <Link
-            href="/persona/new"
-            className="flex h-11 items-center rounded-lg bg-foreground px-4 text-sm font-medium text-background transition-colors hover:opacity-90"
-          >
-            新建人格
-          </Link>
-        ) : null}
-      </PersonaPageHeader>
+    <div className="mimic-page min-h-dvh bg-[#F6F5F4] px-5 py-8 sm:py-12">
+      <div className="mx-auto w-full max-w-xl md:max-w-2xl">
+        <PersonaPageHeader title="人格库" backHref="/chat">
+          {persistence ? (
+            <Link
+              href="/persona/new"
+              className="flex h-11 items-center rounded-lg bg-[#5645D4] px-4 text-sm font-medium text-white transition-colors hover:bg-[#4536A8]"
+            >
+              新建人格
+            </Link>
+          ) : null}
+        </PersonaPageHeader>
 
-      <p className="mt-4 text-sm leading-6 text-zinc-600 dark:text-zinc-400">
-        人格决定 TA 是谁、怎么说话。切换人格会开启一场新会话 ——
-        通话中的人格与音色无法中途修改。
-      </p>
-
-      {!persistence ? (
-        <p className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-400">
-          未配置 DATABASE_URL,人格库不可用:只能使用下面的预设,无法新建或复制。
-          在 .env.local 中补上即可(参考 .env.example)。
+        <p className="mt-4 text-sm leading-6 text-[#5D5B54]">
+          人格决定 TA 是谁、怎么说话。你的陪伴人格在孵化时已经定格(标「陪伴中」的那位,
+          不可修改);这里可以浏览、另存副本、调教新的定义。
         </p>
-      ) : null}
 
-      <div className="mt-8">
-        <PersonaList presets={presets} customs={customs} />
+        {!persistence ? (
+          <p className="mt-4 rounded-lg border border-[#B7791F]/30 bg-[#B7791F]/5 px-3 py-2 text-xs leading-5 text-[#975A16]">
+            未配置 DATABASE_URL,人格库不可用:只能使用下面的预设,无法新建或复制。
+            在 .env.local 中补上即可(参考 .env.example)。
+          </p>
+        ) : null}
+
+        <div className="mt-8 pb-8">
+          <PersonaList presets={presets} customs={customs} />
+        </div>
       </div>
     </div>
   );

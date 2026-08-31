@@ -1,5 +1,8 @@
 /**
- * 拟态球陪伴系统 · 设计 token 与动画（/mimic 路由组专用）。
+ * 拟态球陪伴系统 · 设计 token 与动画（根布局全局引入）。
+ *
+ * 2026-08-31 UI 大一统：拟态球界面升为主界面（根路由），本文件随之
+ * 从 /mimic 路由组布局提升到根布局，不再有作用域限制。
  *
  * 几何与色值全部取自 Ardot 设计稿《Chat Elf 陪伴机器人》
  * （file id 720464397701019，2026-08-30 经 MCP 逐节点提取），
@@ -38,7 +41,12 @@
 }
 
 .mimic-page {
-  animation: mimic-fade-in 180ms ease-out both;
+  /* fill-mode 用 backwards 而非 both:both 会把结束帧 translateY(0) 永久留在
+     computed style,任何非 none 的 transform 都会让 .mimic-page 成为
+     position:fixed 后代的包含块 —— 页面内的吸底条/抽屉会锚到页面盒底部
+     而不是视口底部(2026-08-31 H5 实测踩坑)。动画只有 180ms,
+     而固定条/抽屉都在 180ms 之后才挂载,视觉上无感。 */
+  animation: mimic-fade-in 180ms ease-out backwards;
 }
 
 /* 球的浮动/眨眼/呼吸/morph/burst 等动画由 bloub 引擎逐帧驱动

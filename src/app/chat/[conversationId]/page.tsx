@@ -1,11 +1,11 @@
 /**
- * 对话页:Server Component 读取当前接入通道(tokenplan / dashscope)的
- * 会话参数预设、组装记忆上下文、回显本会话的历史转写,一并注入客户端面板;
- * 实时会话、麦克风等浏览器能力全部位于 ChatPanel('use client')内 —— 编码约定。
+ * 对话页(服务端壳,2026-08-31 起为唯一对话 UI):读通道预设、组装记忆上下文、
+ * 回显本会话的历史转写,一并注入 MimicChatPanel('use client')——
+ * 实时会话与麦克风等浏览器能力全部位于客户端(编码约定)。
  * 密钥只用于信令路由,不经本页下发。
  */
 
-import { ChatPanel } from "@/components/chat/chat-panel";
+import { MimicChatPanel } from "@/components/mimic/mimic-chat-panel";
 import { isDatabaseConfigured } from "@/lib/db/client";
 import { loadTranscript } from "@/lib/memory/conversations";
 import { buildMemoryContext } from "@/lib/memory/context-builder";
@@ -28,6 +28,7 @@ export default async function ChatPage({
   // 进入已有会话时回显历史转写。role 在库里是 text 列,逐条收窄后再传给客户端
   // (不做类型断言);system 角色的注入消息不参与回显。
   // 一并带出 message id 与已收到的反馈,这样历史消息也能打 👍/👎(step2 T4)。
+  // 无库时 conversationId 是占位 id("local-demo"),loadTranscript 校验不通过返回 []。
   const initialMessages: SeedTranscriptEntry[] = persistence
     ? (await loadTranscript(conversationId, MAX_ECHOED_MESSAGES)).flatMap((message) =>
         message.role === "user" || message.role === "assistant"
@@ -44,9 +45,8 @@ export default async function ChatPage({
     : [];
 
   return (
-    <ChatPanel
-      // key 强制在新会话 id 下重挂载:切换人格会 router.push 到另一个 id,
-      // 若不重挂载,客户端的字幕区与落库游标会带着上一场会话的状态
+    <MimicChatPanel
+      // key 强制在新会话 id 下重挂载,清掉上一场会话的字幕区与落库游标
       key={conversationId}
       conversationId={conversationId}
       sessionDefaults={resolveRealtimeSessionDefaults()}
