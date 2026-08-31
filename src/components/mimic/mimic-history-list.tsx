@@ -8,7 +8,7 @@
  */
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { BallAnchor, useBall } from "@/components/mimic/ball/ball-context";
 import { deleteConversationAction, startConversationAction } from "@/lib/memory/actions";
 import { usePersonaSettings } from "@/lib/persona/use-settings";
@@ -46,6 +46,16 @@ export function MimicHistoryList({
   const [entering, setEntering] = useState(false);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const returningRef = useRef(false);
+
+  /** 返回对话:彗尾归零 + 球预演回 idle,130ms 后切路由(与记忆页返回同款节奏) */
+  function handleReturn(): void {
+    if (returningRef.current) return;
+    returningRef.current = true;
+    ball.setTilt(0);
+    ball.presetMorph("idle");
+    window.setTimeout(() => router.push("/chat"), 130);
+  }
 
   // 滚动 → 彗尾相位(±14° 跟随滚动条位置)
   useEffect(() => {
@@ -89,7 +99,16 @@ export function MimicHistoryList({
     <div className="mimic-page min-h-dvh bg-white">
       {/* 顶栏 */}
       <header className="sticky top-0 z-20 flex h-14 items-center justify-between border-b border-[#E5E3DF] bg-white/95 px-4 backdrop-blur lg:h-16 lg:px-12">
-        <span className="text-base font-semibold text-[#1A1A1A]">Chat Elf · 历史</span>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleReturn}
+            className="flex min-h-[44px] items-center px-2 text-[13px] font-medium text-[#0075DE] hover:text-[#4536A8]"
+          >
+            ← 回到对话
+          </button>
+          <span className="text-base font-semibold text-[#1A1A1A]">Chat Elf · 历史</span>
+        </div>
         <form action={startConversationAction}>
           <input type="hidden" name="persona" value={settings.personaId} />
           <input type="hidden" name="voice" value={settings.voice ?? ""} />

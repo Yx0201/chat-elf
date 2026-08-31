@@ -46,6 +46,8 @@ export interface BallCtl {
   triggerBurst(): void;
   /** 旋转一圈（保存人格 / 换预设的转场） */
   swirl(): void;
+  /** 路由跳转前预演下一场景的常态球态：morph 立刻开始，与页面切换时间重叠 */
+  presetMorph(state: BallState): void;
   /** gaze 方向覆盖（-1..1），null 回退鼠标跟随 */
   setGazeDir(dir: { x: number; y: number } | null): void;
   /** 整球倾斜角（历史页滚动 → 彗星尾巴相位） */
@@ -65,12 +67,32 @@ export function BallProvider({ children }: { children: ReactNode }) {
   const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const ballApiRef = useRef<BallApi | null>(null);
+  /** 跳转前预演的球态:同位置的重复测量不得把它冲掉(见 registerAnchor) */
+  const pendingStateRef = useRef<{ state: BallState; x: number; y: number; size: number; at: number } | null>(null);
+  const anchorRef = useRef<BallAnchorData | null>(null);
+
+  useEffect(() => {
+    anchorRef.current = anchor;
+  }, [anchor]);
 
   const registerAnchor = useCallback((data: BallAnchorData) => {
     clearTimeout(hideTimer.current);
     setAnchor(data);
     setVisible(true);
-    setState(data.state);
+    // 预演窗口(2s)内、位置基本未变的注册 = 本页锚点的重复测量:
+    // 只更新坐标,不覆盖 presetMorph 预演的球态;
+    // 位置明显改变 = 新页面接管锚点,预演结束,球态以新页面为准。
+    const pending = pendingStateRef.current;
+    const sameSpot =
+      pending !== null &&
+      performance.now() - pending.at < 2000 &&
+      Math.abs(data.x - pending.x) < 40 &&
+      Math.abs(data.y - pending.y) < 40 &&
+      data.size === pending.size;
+    if (!sameSpot) {
+      pendingStateRef.current = null;
+      setState(data.state);
+    }
   }, []);
 
   const unregisterAnchor = useCallback(() => {
@@ -95,6 +117,17 @@ export function BallProvider({ children }: { children: ReactNode }) {
     ballApiRef.current?.swirl();
   }, []);
 
+  /**
+   * 跳转前的球态预演:引擎立刻开始 morph,让变形与随后的页面切换重叠。
+   * 预演的球态在 2s 窗口内免疫本页锚点的重复测量(registerAnchor 同位置判定)。
+   */
+  const presetMorph = useCallback((s: BallState) => {
+    const a = anchorRef.current;
+    pendingStateRef.current =
+      a === null ? null : { state: s, x: a.x, y: a.y, size: a.size, at: performance.now() };
+    setState(s);
+  }, []);
+
   const setGazeDir = useCallback((dir: { x: number; y: number } | null) => {
     setGazeDirState(dir);
   }, []);
@@ -111,10 +144,11 @@ export function BallProvider({ children }: { children: ReactNode }) {
       flash,
       triggerBurst,
       swirl,
+      presetMorph,
       setGazeDir,
       setTilt,
     }),
-    [registerAnchor, unregisterAnchor, setBallState, flash, triggerBurst, swirl, setGazeDir, setTilt],
+    [registerAnchor, unregisterAnchor, setBallState, flash, triggerBurst, swirl, presetMorph, setGazeDir, setTilt],
   );
 
   useEffect(
@@ -147,7 +181,7 @@ export function BallProvider({ children }: { children: ReactNode }) {
           opacity: visible ? 1 : 0,
           transform: visible ? "scale(1)" : "scale(0.6)",
           transition:
-            "left 380ms cubic-bezier(0.22,1,0.36,1), top 380ms cubic-bezier(0.22,1,0.36,1), width 480ms cubic-bezier(0.22,1,0.36,1), height 480ms cubic-bezier(0.22,1,0.36,1), opacity 300ms ease, transform 480ms cubic-bezier(0.22,1,0.36,1)",
+            "left 300ms cubic-bezier(0.22,1,0.36,1), top 300ms cubic-bezier(0.22,1,0.36,1), width 400ms cubic-bezier(0.22,1,0.36,1), height 400ms cubic-bezier(0.22,1,0.36,1), opacity 300ms ease, transform 400ms cubic-bezier(0.22,1,0.36,1)",
           visibility: visible ? "visible" : "hidden",
         }}
       >

@@ -11,16 +11,26 @@
  * 一次性语义(产品硬约束):
  *   - 滑块/音色相对所选人格有改动时,生成一份**快照型自建人格**入库
  *     (无库时降级为 CUSTOM_PERSONA_ID + 渲染后的本地文案),让"定格"有据可依;
- *   - 确认前 window.confirm 明确告知不可修改;
+ *   - 确认前弹 shadcn Dialog 明确告知不可修改(已弃用原生 confirm);
  *   - 确认后写 localStorage(settings + hatched 标记)→ 开新会话 → 进对话;
  *   - 已孵化过的浏览器再进本页直接回 /chat。
  */
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { BallAnchor, useBall } from "@/components/mimic/ball/ball-context";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Spinner } from "@/components/ui/spinner";
 import { switchConversationAction } from "@/lib/memory/actions";
 import { savePersonaAction } from "@/lib/persona/actions";
 import { completeHatch, isHatched } from "@/lib/persona/hatch-state";
@@ -105,6 +115,10 @@ export function HatchFlow({
   const [traits, setTraits] = useState<PersonaTraits>(() => ({ ...bases[0].traits }));
   const [voice, setVoice] = useState<string>(bases[0].voice);
   const [saving, setSaving] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [previewState, setPreviewState] = useState<"idle" | "loading" | "playing" | "error">("idle");
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const previewTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 预设常量恒非空(5 个),bases 至少含预设 → 直接索引安全
   const base = bases.find((b) => b.id === baseId) ?? bases[0];
@@ -117,11 +131,78 @@ export function HatchFlow({
   function switchBase(id: string) {
     const next = bases.find((b) => b.id === id);
     if (next === undefined) return;
+    stopPreview();
+    setPreviewState("idle");
     setBaseId(id);
     setTraits({ ...next.traits });
     setVoice(next.voice);
     ball.swirl();
+    // 切换人格 = 换音色,直接自动试听新音色
+    previewVoice(next.voice);
   }
+
+  /** 终止正在进行的试听(切音色 / 换人格 / 卸载时调用)。 */
+  function stopPreview(): void {
+    if (previewTimeoutRef.current !== null) {
+      clearTimeout(previewTimeoutRef.current);
+      previewTimeoutRef.current = null;
+    }
+    const audio = audioRef.current;
+    if (audio !== null) {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+      audioRef.current = null;
+    }
+  }
+
+  function previewVoice(voiceId: string): void {
+    stopPreview();
+    setPreviewState("loading");
+
+    const audio = new Audio();
+    audio.preload = "auto";
+    audioRef.current = audio;
+
+    audio.addEventListener("playing", () => {
+      if (previewTimeoutRef.current !== null) {
+        clearTimeout(previewTimeoutRef.current);
+        previewTimeoutRef.current = null;
+      }
+      setPreviewState("playing");
+    });
+    audio.addEventListener("ended", () => {
+      stopPreview();
+      setPreviewState("idle");
+    });
+    audio.addEventListener("error", () => {
+      stopPreview();
+      setPreviewState("error");
+    });
+
+    audio.src = `/api/voice-preview?voice=${encodeURIComponent(voiceId)}`;
+    void audio.play().catch(() => {
+      stopPreview();
+      setPreviewState("error");
+    });
+
+    // 合成 + 传输兜底;进入播放态后由 playing 事件清除
+    previewTimeoutRef.current = setTimeout(() => {
+      setPreviewState((s) => (s === "loading" ? "error" : s));
+      stopPreview();
+    }, 15_000);
+
+    ball.flash("wink", 600);
+  }
+
+  // 卸载时清理在播音频
+  useEffect(() => {
+    return () => {
+      if (previewTimeoutRef.current !== null) {
+        clearTimeout(previewTimeoutRef.current);
+      }
+    };
+  }, []);
 
   function handleSlider(key: Exclude<TraitKey, "closeness">, value: number, row: number) {
     setTraits((t) => ({ ...t, [key]: value }));
@@ -143,10 +224,6 @@ export function HatchFlow({
 
   async function confirmHatch(): Promise<void> {
     if (saving) return;
-    const ok = window.confirm(
-      "人格与音色在孵化时一次性确定,之后无法修改 —— TA 就是往后一直陪伴你的那个角色。确定现在孵化吗?",
-    );
-    if (!ok) return;
 
     setSaving(true);
 
@@ -243,12 +320,22 @@ export function HatchFlow({
           </span>
           <button
             type="button"
-            onClick={() => ball.flash("wink", 600)}
-            className="flex min-h-[44px] items-center px-1 text-[13px] font-medium text-[#0075DE] transition-colors hover:text-[#4536A8]"
+            onClick={() => previewVoice(voice)}
+            disabled={previewState === "loading" || previewState === "playing"}
+            className="flex min-h-[44px] items-center px-1 text-[13px] font-medium text-[#0075DE] transition-colors hover:text-[#4536A8] disabled:opacity-60"
           >
-            试听
+            {previewState === "loading"
+              ? "合成中…"
+              : previewState === "playing"
+                ? "播放中…"
+                : previewState === "error"
+                  ? "重试"
+                  : "试听"}
           </button>
         </div>
+        {previewState === "error" ? (
+          <p className="text-xs text-red-500">试听失败,请稍后再试</p>
+        ) : null}
 
         <p className="hidden max-w-[360px] text-center text-xs leading-[1.6] text-[#787671] lg:block">
           hexagon 态。拖滑块时球转向该行;确认时 swirl 转一圈,再 morph 回 idle。
@@ -313,7 +400,13 @@ export function HatchFlow({
           <select
             id="hatch-voice"
             value={voice}
-            onChange={(e) => setVoice(e.target.value)}
+            onChange={(e) => {
+              stopPreview();
+              setPreviewState("idle");
+              setVoice(e.target.value);
+              // 换音色即自动试听新音色
+              previewVoice(e.target.value);
+            }}
             className="h-11 rounded-lg border border-[#E5E3DF] bg-white px-3 text-sm text-[#1A1A1A] focus:border-[#5645D4] focus:outline-none"
           >
             {REALTIME_VOICES.map((v) => (
@@ -324,7 +417,7 @@ export function HatchFlow({
             ))}
           </select>
           <p className="text-xs leading-5 text-[#A4A097]">
-            5 个系统音色;特质描述参考同名 TTS 音色,实时模型听感可能不同。
+            5 个系统音色。试听以同名 TTS 音色实时合成,与实时模型听感可能略有差异。
           </p>
         </div>
 
@@ -346,7 +439,7 @@ export function HatchFlow({
         <div className="fixed inset-x-0 bottom-0 z-30 bg-[#F6F5F4]/95 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur lg:static lg:bg-transparent lg:px-0 lg:pt-0 lg:pb-0 lg:backdrop-blur-none">
           <button
             type="button"
-            onClick={() => void confirmHatch()}
+            onClick={() => setConfirmOpen(true)}
             disabled={saving}
             className="h-12 w-full rounded-lg bg-[#5645D4] text-sm font-semibold text-white transition-colors hover:bg-[#4536A8] active:bg-[#4536A8] disabled:opacity-70"
           >
@@ -359,6 +452,48 @@ export function HatchFlow({
             </p>
           )}
         </div>
+
+        {/* 孵化确认弹窗(原生 confirm 已弃用,统一 shadcn Dialog) */}
+        <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>一次性选择 · 确定孵化?</DialogTitle>
+              <DialogDescription>
+                人格与音色在孵化时一次性确定,之后无法修改 —— TA 就是往后一直陪伴你的那个角色。
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                className="min-h-11 flex-1"
+                onClick={() => setConfirmOpen(false)}
+              >
+                再想想
+              </Button>
+              <Button
+                className="min-h-11 flex-1"
+                onClick={() => {
+                  setConfirmOpen(false);
+                  void confirmHatch();
+                }}
+              >
+                确定孵化
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* 试听合成全局 loading:等待音频加载期间遮罩全屏 */}
+        {previewState === "loading" ? (
+          <div
+            className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-[#F6F5F4]/80 backdrop-blur-sm"
+            role="status"
+            aria-label="正在合成试听音频"
+          >
+            <Spinner className="size-8 text-primary" />
+            <p className="text-[13px] font-medium text-[#5D5B54]">正在合成试听音频…</p>
+          </div>
+        ) : null}
       </section>
     </div>
   );

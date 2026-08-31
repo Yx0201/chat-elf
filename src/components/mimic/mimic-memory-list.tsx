@@ -7,9 +7,8 @@
  * 分组渲染、球态交互(点条目 wink / 删除 sleep)、deleteMemoryAction 落库。
  */
 
-import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { BallAnchor, useBall } from "@/components/mimic/ball/ball-context";
 import { deleteMemoryAction } from "@/lib/memory/actions";
 import type { MemoryListItem } from "@/lib/memory/store";
@@ -72,8 +71,20 @@ export function MimicMemoryList({
   const router = useRouter();
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const returningRef = useRef(false);
 
   const groups = groupMemories(memories);
+
+  /**
+   * 返回对话:球先在本页开始 morph(notify → idle),130ms 后切路由,
+   * 飞行与变形和聊天页的 180ms 淡入相互重叠 —— 点击即看到球"带队"转场。
+   */
+  function handleReturn(): void {
+    if (returningRef.current) return;
+    returningRef.current = true;
+    ball.presetMorph("idle");
+    window.setTimeout(() => router.push("/chat"), 130);
+  }
 
   function handleItemClick(): void {
     ball.flash("wink", 650);
@@ -163,9 +174,13 @@ export function MimicMemoryList({
       <section className="mx-auto flex w-full max-w-[1000px] flex-col gap-4 px-4 py-6 lg:gap-4 lg:px-12 lg:py-10">
         <header className="flex items-baseline justify-between">
           <h2 className="text-xl font-semibold text-[#1A1A1A] lg:text-[22px]">在你眼中</h2>
-          <Link href="/chat" className="text-[13px] font-medium text-[#0075DE] hover:text-[#4536A8]">
+          <button
+            type="button"
+            onClick={handleReturn}
+            className="flex min-h-[44px] items-center px-2 text-[13px] font-medium text-[#0075DE] hover:text-[#4536A8]"
+          >
             ← 回到对话
-          </Link>
+          </button>
         </header>
 
         {!persistence ? (

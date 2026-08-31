@@ -136,7 +136,36 @@ export function MimicChatPanel({
 
   const [mode, setMode] = useState<"company" | "transcript">("company");
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [modeBusy, setModeBusy] = useState(false);
+  const modeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  /** 爆散编排(bloub burst 态:0.7s 塌缩 → 粒子螺旋 → 1.7s 起重组定型) */
+  function toggleMode(): void {
+    if (modeBusy) return;
+    if (mode === "company") {
+      // 陪伴 → 字幕:彩虹爆散,粒子散开后球淡出、字幕聊天记录接上
+      setModeBusy(true);
+      ball.triggerBurst();
+      modeTimerRef.current = setTimeout(() => {
+        setMode("transcript");
+        setModeBusy(false);
+      }, 1150);
+    } else {
+      // 字幕 → 陪伴:球回到舞台当场爆散(或衔接上一轮爆散的重组段),定成陪伴球
+      setMode("company");
+      ball.triggerBurst();
+      setModeBusy(true);
+      modeTimerRef.current = setTimeout(() => setModeBusy(false), 1200);
+    }
+  }
+
+  // 卸载清理切换定时器
+  useEffect(() => {
+    return () => {
+      if (modeTimerRef.current !== null) clearTimeout(modeTimerRef.current);
+    };
+  }, []);
 
   const active =
     session.status !== "idle" && session.status !== "starting" && session.status !== "negotiating";
@@ -348,8 +377,8 @@ export function MimicChatPanel({
       <footer className="flex h-[76px] shrink-0 items-center justify-between border-t border-[#E5E3DF] bg-white px-5 pb-[max(0px,env(safe-area-inset-bottom))] lg:h-[88px] lg:px-12">
         <button
           type="button"
-          onClick={() => setMode(mode === "company" ? "transcript" : "company")}
-          className="flex h-11 items-center gap-1 rounded-lg bg-[#F6F5F4] p-1"
+          onClick={toggleMode}
+          className={`flex h-11 items-center gap-1 rounded-lg bg-[#F6F5F4] p-1 transition-opacity ${modeBusy ? "opacity-60" : ""}`}
           aria-label="切换陪伴/字幕模式"
         >
           <span

@@ -19,12 +19,11 @@ function ThumbIcon({ up }: { up: boolean }) {
     <svg
       viewBox="0 0 24 24"
       aria-hidden
-      className="h-4 w-4"
+      className={`h-4 w-4 ${up ? "" : "rotate-180"}`}
       fill="none"
       stroke="currentColor"
       strokeWidth="1.8"
       strokeLinejoin="round"
-      {...(up ? {} : { transform: "rotate(180 12 12)" })}
     >
       <path d="M7 10.5V20H4.5A1.5 1.5 0 0 1 3 18.5v-6.5a1.5 1.5 0 0 1 1.5-1.5H7Zm0 0 4.2-7a1.9 1.9 0 0 1 3.4 1.6L13.7 10.5h4.6a2 2 0 0 1 2 2.4l-1.3 6.3a2 2 0 0 1-2 1.6H7v-10.3Z" />
     </svg>
