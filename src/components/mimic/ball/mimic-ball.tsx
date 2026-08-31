@@ -44,8 +44,11 @@ const YAW_MAX = 16;
 const PITCH_MAX = 13;
 /** 光标居中时的注视高度（微仰，显得 attent）。 */
 const PITCH = 10;
-/** 入场整圈的完成时长（眼绕球面一周并落定）。 */
-const TURN_TIME = 1.1;
+/**
+ * 鼠标跟随的入场一整圈（SPIN 360° / TURN_TIME 1.1s，bloub 的「Le tour」）
+ * 已按用户拍板移除（2026-08-31）：目光直接跟随光标,只保留引擎默认的
+ * LOOK_MORPH 0.24s 快速追赶。SPIN 仍被 swirl(千鸟纹波)使用。
+ */
 const SPIN = 360;
 /** swirl 脚本时长（bloub TOUR_TIME）。 */
 const SWIRL_TIME = 1.5;
@@ -107,7 +110,6 @@ export function MimicBall({
   /** 鼠标最后已知位置（client 坐标）；null = 无指针。 */
   const pointerRef = useRef<{ x: number; y: number } | null>(null);
   const aimingRef = useRef(false);
-  const turnSinceRef = useRef(0);
   /** swirl 脚本的起始时钟；null = 未在播。 */
   const swirlSinceRef = useRef<number | null>(null);
   /** burst 结束时刻；null = 未在播。 */
@@ -242,7 +244,9 @@ export function MimicBall({
             now,
           );
         } else {
-          // 指针跟随：只在静止脸状态生效（其余状态的注视就是动画本身）
+          // 指针跟随：只在静止脸状态生效（其余状态的注视就是动画本身）。
+          // 2026-08-31 用户拍板移除「入场整圈」：目光直接追光标，
+          // 由引擎默认 LOOK_MORPH 0.24s 快速追赶,不再绕球面旋转。
           const def = STATE_BY_ID.get(stateRef.current);
           const pointer = pointerRef.current;
           if (def?.baseFace === true && pointer !== null && interactiveRef.current) {
@@ -250,25 +254,23 @@ export function MimicBall({
             // 无面积的盒子（浏览器窗格隐藏时会出现）没有可瞄准的东西，
             // 且下面的归一化会变成 0/0 —— NaN 会被引擎永久保留
             if (box !== undefined && box.width > 0 && box.height > 0) {
-              if (!aimingRef.current) turnSinceRef.current = now;
               aimingRef.current = true;
               const demiW = Math.max(1, window.innerWidth / 2);
               const demiH = Math.max(1, window.innerHeight / 2);
-              const tour = easings.easeOutQuint(clamp((now - turnSinceRef.current) / TURN_TIME));
               engine.setLook(
                 {
                   yaw: clamp((pointer.x - (box.left + box.width / 2)) / demiW, -1, 1) * YAW_MAX,
                   pitch: PITCH - clamp((pointer.y - (box.top + box.height / 2)) / demiH, -1, 1) * PITCH_MAX,
-                  mix: tour,
-                  spin: SPIN * (1 - tour),
+                  mix: 1,
+                  spin: 0,
                   wander: 0,
                 },
                 now,
               );
             }
           } else if (aimingRef.current) {
-            // 与来程同时长：头在球落下的同时转回正面
-            engine.setLook(null, now, TURN_TIME);
+            // 光标离开：同样快速回落到休眠姿态，不绕圈
+            engine.setLook(null, now);
             aimingRef.current = false;
           }
         }

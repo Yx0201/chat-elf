@@ -7,8 +7,16 @@
  * 登录成功:本地已有孵化记录 → 直进 /chat;首次来访 → /hatch 孵化。
  *
  * 纯 UI 演示:本期不做账号体系(2026-08-30 已拍板),表单只在本地校验,
- * 不发任何请求。桌面左右分栏(左深色舞台放 egg 球,右表单);H5 单列
- * 全深底、球在上、表单在下(设计稿 3.1 的 H5 形态)。
+ * 不发任何请求。
+ *
+ * 布局(2026-08-31 二次改版,对齐 bloub 设置页的动效语言,用户拍板):
+ * - 桌面:左半场是 bloub 设置页的镜像——一只超大的 idle 球(light 变体,
+ *   大小与 bloub 的巨球相当)停在左半场、微微偏出画面左缘,被右半场
+ *   的白色表单遮住出血边;眼睛全程跟随鼠标。页面本身**不播**千鸟纹波,
+ *   swirl 只属于提交时刻。
+ * - 提交校验通过 → 球播 swirl(三环入场 + 眼绕球面一整圈,约 1.5s),
+ *   动画结束后球随路由飞到中间,进入 /hatch(已孵化则 /chat)。
+ * - H5:单列,idle 球在上、表单在下(bloub 在窄屏同样不放大小球)。
  */
 
 import Link from "next/link";
@@ -45,14 +53,15 @@ export default function LoginPage() {
       return;
     }
 
-    // 已孵化 → 直进对话;未孵化 → 去孵化页。burst 后延时给球转场留足节奏。
+    // 已孵化 → 直进对话;未孵化 → 去孵化页。
+    // 提交即千鸟纹波:swirl(三环入场 + 眼绕球面一整圈,~1.5s),
+    // 动画结束后球随路由飞到中间(孵化页的居中锚点接管)。
     setError(null);
     setSubmitting(true);
-    ball.triggerBurst();
-    ball.setBallState("idle");
+    ball.swirl();
     errorTimer.current = setTimeout(
       () => router.replace(isHatched() ? "/chat" : "/hatch"),
-      1900,
+      1550,
     );
   }
 
@@ -60,25 +69,31 @@ export default function LoginPage() {
 
   return (
     <div className="mimic-page min-h-dvh bg-[#0A1530] lg:grid lg:grid-cols-2">
-      {/* 左舞台(H5 为顶部区域) */}
-      <section className="flex flex-col items-center justify-center gap-5 px-6 py-12 lg:min-h-dvh lg:gap-6 lg:py-16">
-        <BallAnchor state="egg" variant="light" className="h-40 w-40 lg:h-[260px] lg:w-[260px]" />
-        <h1 className="text-center text-[30px] font-semibold leading-tight text-white lg:text-[56px]">
-          一个会转头看你的陪伴。
-        </h1>
-        <p className="hidden max-w-[420px] text-center text-sm text-[#A4A097] lg:block">
-          登录后,从孵化到记忆翻阅,整套旅程都围着这颗拟态球转。
-        </p>
-        <Link
-          href="/language"
-          className="text-[13px] text-[#787671] transition-colors hover:text-[#A4A097]"
-        >
-          拟态球怎么活在系统里 →
-        </Link>
+      {/* 左半场:巨型 idle 球(bloub 设置页镜像);H5 为顶部常规球。 */}
+      <section className="relative flex flex-col items-center gap-5 overflow-hidden px-6 py-12 lg:block lg:min-h-dvh lg:px-0 lg:py-0">
+        <BallAnchor
+          state="idle"
+          variant="light"
+          className="h-40 w-40 lg:absolute lg:left-[-10vw] lg:top-[3vh] lg:h-[64vw] lg:w-[64vw]"
+        />
+        <div className="flex flex-col items-center gap-5 lg:hidden">
+          <h1 className="text-center text-[30px] font-semibold leading-tight text-white">
+            一个会转头看你的陪伴。
+          </h1>
+          <p className="max-w-[420px] py-4 text-center text-sm text-[#A4A097]">
+            登录后,从孵化到记忆翻阅,整套旅程都围着这颗拟态球转。
+          </p>
+          <Link
+            href="/language"
+            className="text-[13px] text-[#787671] transition-colors hover:text-[#A4A097]"
+          >
+            拟态球怎么活在系统里 →
+          </Link>
+        </div>
       </section>
 
-      {/* 右表单(H5 深底;桌面白底) */}
-      <section className="flex flex-col justify-center gap-5 px-6 pb-10 lg:min-h-dvh lg:bg-white lg:px-24">
+      {/* 右表单(H5 深底;桌面白底,盖住球的出血边 —— z 高于球层) */}
+      <section className="relative z-50 flex flex-col justify-center gap-5 px-6 pb-10 lg:min-h-dvh lg:bg-white lg:px-24">
         <div className={shake}>
           <p className="text-[11px] font-semibold tracking-wide text-[#8B7BF6] lg:text-[#5645D4]">第一步</p>
           <h1 className="mt-2 text-3xl font-semibold text-white lg:mt-0 lg:text-4xl lg:text-[#1A1A1A]">
@@ -128,6 +143,13 @@ export default function LoginPage() {
         <p className="text-[13px] leading-[1.55] text-[#A4A097]">
           账号仅用于演示流程:校验在本地完成,不会发送任何请求。
         </p>
+
+        <Link
+          href="/language"
+          className="hidden text-[13px] text-[#787671] transition-colors hover:text-[#A4A097] lg:block"
+        >
+          拟态球怎么活在系统里 →
+        </Link>
       </section>
     </div>
   );

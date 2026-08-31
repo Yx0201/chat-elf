@@ -4,9 +4,12 @@
  * 孵化流程(2026-08-31 UI 大一统新增)— /hatch 的客户端主体。
  *
  * 两个阶段:
- *   1. egg —— 深色舞台 + 蛋形球,点「唤醒它」:egg → burst → idle;
- *   2. persona —— 一次性性格设置(设计稿 3.2 布局):预设/自建人格 chips +
- *      五维滑块 + 音色 + 预览卡。确认即定格,不可修改。
+ *   1. egg —— 深色舞台 + 蛋形球。点「唤醒它」(2026-08-31 二次改版):
+ *      蛋直接播彗星动画(塌缩成点 + 拖尾),球随后飞到页面左上角,
+ *      进入 persona;
+ *   2. persona —— 一次性性格设置:球定居**左上角**(hexagon 态),
+ *      下方是预设/自建人格 chips + 五维滑块 + 音色 + 预览卡。
+ *      确认即定格,不可修改。
  *
  * 一次性语义(产品硬约束):
  *   - 滑块/音色相对所选人格有改动时,生成一份**快照型自建人格**入库
@@ -292,8 +295,10 @@ export function HatchFlow({
         <button
           type="button"
           onClick={() => {
-            ball.triggerBurst();
+            // 唤醒:彗星(塌缩成点 + 缎带拖尾)在场中划过,
+            // 随后球飞到左上角定居,进入性格音色设置
             ball.setBallState("idle");
+            ball.flash("comet", 1400);
             setTimeout(() => setStage("persona"), 900);
           }}
           className="h-12 rounded-lg bg-[#5645D4] px-8 text-sm font-medium text-white transition-colors hover:bg-[#4536A8] active:bg-[#4536A8]"
@@ -307,12 +312,12 @@ export function HatchFlow({
 
   return (
     <div className="mimic-page min-h-dvh bg-[#F6F5F4] lg:flex">
-      {/* 左舞台(H5 顶部紧凑区) */}
-      <section className="relative flex flex-col items-center gap-4 border-b border-[#E5E3DF] bg-white px-6 pb-8 pt-6 lg:w-[480px] lg:min-h-dvh lg:shrink-0 lg:border-r lg:border-b-0 lg:gap-5 lg:px-10 lg:py-10">
+      {/* 左舞台(H5 顶部紧凑区;球从上一步彗星场飞来,定居左上角) */}
+      <section className="relative flex flex-col items-start gap-4 border-b border-[#E5E3DF] bg-white px-6 pb-8 pt-6 lg:w-[480px] lg:min-h-dvh lg:shrink-0 lg:border-r lg:border-b-0 lg:gap-5 lg:px-10 lg:py-10">
+        <BallAnchor state="hexagon" className="h-24 w-24 lg:h-32 lg:w-32" />
         <p className="text-[11px] font-semibold tracking-wide text-[#5645D4]">第二步 · 一次性定格</p>
-        <BallAnchor state="hexagon" className="h-44 w-44 lg:h-[220px] lg:w-[220px]" />
         <h1 className="text-2xl font-semibold text-[#1A1A1A] lg:text-[28px]">{base.name}</h1>
-        <p className="max-w-[320px] text-center text-sm leading-[1.5] text-[#5D5B54]">{base.tagline}</p>
+        <p className="max-w-[320px] text-sm leading-[1.5] text-[#5D5B54]">{base.tagline}</p>
 
         <div className="flex h-11 w-full max-w-[360px] items-center justify-between rounded-lg bg-[#F6F5F4] px-4">
           <span className="text-sm font-medium text-[#37352E]">
@@ -340,7 +345,7 @@ export function HatchFlow({
         <p className="hidden max-w-[360px] text-center text-xs leading-[1.6] text-[#787671] lg:block">
           hexagon 态。拖滑块时球转向该行;确认时 swirl 转一圈,再 morph 回 idle。
         </p>
-        <span className="lg:absolute lg:left-10 lg:top-6">{walkBack}</span>
+        <span className="lg:absolute lg:right-10 lg:top-6">{walkBack}</span>
       </section>
 
       {/* 右表单区(H5 吸底确认条) */}

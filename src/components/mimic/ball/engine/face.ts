@@ -5,11 +5,12 @@
  * 压缩与倾斜由投影自然产生，这就是体积感的来源。
  * 常数来自逐帧测量的拟合（残差 ~1 px / 半径 190 px），不要手调。
  *
- * ⚠️ chat-elf 唯一改动：REST_GAZE。
- * bloub 实测的静止姿态是 {yaw 28.49, pitch 28.62, roll -13}（转头望向右上的
- * 视频姿态）；chat-elf 用户拍板为「正视镜头、双眼正中对称」，
- * 故 yaw/roll 归零，pitch 取 bloub 光标跟随的注视高度 PITCH = 10（微仰，
- * 显得 attent）。除此之外一切几何与动画参数与 bloub 一致。
+ * REST_GAZE（2026-08-31 二次拍板）：恢复 bloub 原版静止姿态
+ * {yaw 28.49, pitch 28.62, roll -13} —— 头默认望向右上的 3/4 侧脸，
+ * 一只眼靠轮廓收窄、一只眼在中间显圆,体积感即由此而来。
+ * 早前「正视镜头、双眼正中对称」的改版（yaw/roll 归零）已废弃:
+ * 用户对照 bloub 实机后确认侧脸感才是目标形态。
+ * 除本行外一切几何与动画参数与 bloub 一致。
  */
 
 import { clamp, createRng, loopNoise } from "./math";
@@ -20,8 +21,8 @@ export const EYE_SPLIT = 15.46;
 export const EYE_W = 0.186;
 export const EYE_H = 0.412;
 
-/** 静止头部朝向（见文件头说明：chat-elf 改为正视）。 */
-export const REST_GAZE: HeadGaze = { yaw: 0, pitch: 10, roll: 0 };
+/** 静止头部朝向（bloub 原版实测值,见文件头说明）。 */
+export const REST_GAZE: HeadGaze = { yaw: 28.49, pitch: 28.62, roll: -13 };
 
 export interface EyePose {
   x: number;
