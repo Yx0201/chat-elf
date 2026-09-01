@@ -60,9 +60,15 @@ export async function POST(request: Request): Promise<Response> {
       body: offerSdp,
       cache: "no-store",
     });
-  } catch {
+  } catch (error) {
+    // 连接层失败必须落日志并透出原因(DNS/TLS/超时各异),否则线上只见 502 无法归因。
+    console.error("[realtime/session] 信令连接失败:", error);
+    const reason =
+      error instanceof Error && error.cause instanceof Error
+        ? `${error.name}: ${error.message}; cause=${error.cause.name}: ${error.cause.message}`
+        : String(error);
     return Response.json(
-      { error: `连接 ${config.provider} 信令端点失败` },
+      { error: `连接 ${config.provider} 信令端点失败`, reason },
       { status: 502 },
     );
   }
