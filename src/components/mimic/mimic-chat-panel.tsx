@@ -22,9 +22,11 @@
  */
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { BallAnchor, useBall } from "@/components/mimic/ball/ball-context";
 import { MessageFeedback } from "@/components/chat/message-feedback";
+import { authClient } from "@/lib/auth/client";
 import type { BallState } from "@/components/mimic/ball/types";
 import {
   appendMessagesAction,
@@ -34,7 +36,7 @@ import {
 import { renderPersonaInstructions } from "@/lib/persona/render";
 import { findPersona, resolvePersona } from "@/lib/persona/resolve";
 import type { PersonaRecord } from "@/lib/persona/types";
-import { usePersonaSettings } from "@/lib/persona/use-settings";
+import type { PersonaSettings } from "@/lib/persona/settings";
 import { REMEMBER_FACT_USAGE_HINT, type RealtimeSessionDefaults } from "@/lib/realtime/session-defaults";
 import {
   useRealtimeSession,
@@ -95,6 +97,7 @@ export function MimicChatPanel({
   persistence,
   initialMessages,
   personas,
+  companionPersona,
 }: {
   conversationId: string;
   sessionDefaults: RealtimeSessionDefaults;
@@ -103,9 +106,18 @@ export function MimicChatPanel({
   persistence: boolean;
   initialMessages: readonly SeedTranscriptEntry[];
   personas: readonly PersonaRecord[];
+  /** 孵化定格的人格/音色(服务端 companion,人格真源) */
+  companionPersona: { personaId: string | null; voice: string };
 }) {
   const ball = useBall();
-  const { settings } = usePersonaSettings();
+
+  // 人格真源是服务端 companion(props)。personaId 为 null(人格被删)时走
+  // resolvePersona 的回落链;customInstructions 属无库时代遗留,恒为空。
+  const settings: PersonaSettings = {
+    personaId: companionPersona.personaId ?? "",
+    customInstructions: "",
+    voice: companionPersona.voice,
+  };
 
   // 人格 → instructions(客户端渲染,随 session.update 下发);
   // 展示用的名字/音色走 findPersona(查不到记录时回落渲染人格的名字)
@@ -146,6 +158,8 @@ export function MimicChatPanel({
   const { attachMessageId } = session;
 
   const [mode, setMode] = useState<"company" | "transcript">("company");
+  const [signingOut, setSigningOut] = useState(false);
+  const router = useRouter();
   const [sheetOpen, setSheetOpen] = useState(false);
   const [modeBusy, setModeBusy] = useState(false);
   const modeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -535,6 +549,29 @@ export function MimicChatPanel({
                 <p className="text-xs text-[#975A16]">未配置 DATABASE_URL,会话不落库、无历史与记忆。</p>
               </div>
             ) : null}
+
+            {/* 退出登录(用户体系 step1 T5):危险动作,与导航链接视觉分层、贴抽屉底 */}
+            <div className="mt-auto pt-4">
+              <button
+                type="button"
+                disabled={signingOut}
+                onClick={() => {
+                  setSigningOut(true);
+                  void authClient
+                    .signOut({
+                      fetchOptions: {
+                        onSuccess: () => {
+                          router.replace("/");
+                        },
+                      },
+                    })
+                    .catch(() => setSigningOut(false));
+                }}
+                className="flex min-h-[44px] w-full items-center justify-center rounded-xl border border-[#E5E3DF] px-4 text-sm font-medium text-[#B3261E] transition-colors hover:border-[#B3261E]/40 hover:bg-[#B3261E]/5 disabled:opacity-60"
+              >
+                {signingOut ? "正在退出…" : "退出登录"}
+              </button>
+            </div>
           </div>
         </div>
       )}

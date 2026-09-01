@@ -48,3 +48,6 @@ next-env.d.ts
 # 其它 Agent / IDE 工具的工作目录(与 /Memory 同类,均为工具产物而非源码)
 /.workbuddy
 /.zcode
+
+# GUI 测试过程产物截图
+/gui-test-screenshots

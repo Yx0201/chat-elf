@@ -1,14 +1,14 @@
 /**
- * 会话与消息的服务端数据访问(step1 P4)。
+ * 会话与消息的服务端数据访问(step1 P4;用户体系 step1 起按真实 userId 隔离)。
  *
  * 只在服务端调用(Server Component / Server Action)。
- * 单用户阶段 `user_id` 一律取 `LOCAL_USER_ID`(ARCHITECTURE.md「持久化架构」:
- * 数据库访问走 Next.js 服务端可信通道,不启用 RLS)。
+ * userId 由调用方从会话(session.ts)传入 —— 多用户下所有查询都带归属过滤,
+ * 客户端传来的 conversationId 即使格式合法,不属于当前用户也一律当作不存在。
  */
 
-import { desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb } from "@/lib/db/client";
-import { conversations, feedback as feedbackTable, messages, LOCAL_USER_ID } from "@/lib/db/schema";
+import { conversations, feedback as feedbackTable, messages } from "@/lib/db/schema";
 import { isValidPersonaId } from "@/lib/persona/types";
 
 export interface MessageInput {
@@ -33,23 +33,39 @@ export function isValidConversationId(id: string): boolean {
 }
 
 /**
+ * 会话是否属于该用户。归属校验是多用户安全的地基:不属于自己的会话,
+ * 读与写都当作"不存在"处理(不暴露"无权限",避免探测他人会话 id)。
+ */
+async function conversationBelongsTo(userId: string, conversationId: string): Promise<boolean> {
+  const [row] = await getDb()
+    .select({ id: conversations.id })
+    .from(conversations)
+    .where(and(eq(conversations.id, conversationId), eq(conversations.userId, userId)))
+    .limit(1);
+  return row !== undefined;
+}
+
+/**
  * 新建会话,返回 id。标题留空,待首条用户消息落库时回填。
  *
  * `personaId` 是 step2 的 personas 外键。只有**自建人格的 uuid** 才写外键 ——
  * 预设的 id 是 archetype 字符串(如 'xiaoyou'),不是 uuid,写进去会违反外键类型。
  * 两种情况下 `persona` 文本列都记下当时的选择,作为历史列表的展示快照。
  */
-export async function createConversation(input?: {
-  personaId?: string | null;
-  persona?: string | null;
-  voice?: string | null;
-}): Promise<string> {
+export async function createConversation(
+  userId: string,
+  input?: {
+    personaId?: string | null;
+    persona?: string | null;
+    voice?: string | null;
+  },
+): Promise<string> {
   const db = getDb();
   const personaId = input?.personaId ?? null;
   const [row] = await db
     .insert(conversations)
     .values({
-      userId: LOCAL_USER_ID,
+      userId,
       personaId: personaId !== null && isValidPersonaId(personaId) ? personaId : null,
       persona: input?.persona ?? null,
       voice: input?.voice ?? null,
@@ -58,7 +74,10 @@ export async function createConversation(input?: {
   return row.id;
 }
 
-export async function listConversations(limit = 30): Promise<ConversationSummary[]> {
+export async function listConversations(
+  userId: string,
+  limit = 30,
+): Promise<ConversationSummary[]> {
   const db = getDb();
   return db
     .select({
@@ -71,17 +90,19 @@ export async function listConversations(limit = 30): Promise<ConversationSummary
     })
     .from(conversations)
     .leftJoin(messages, eq(messages.conversationId, conversations.id))
-    .where(eq(conversations.userId, LOCAL_USER_ID))
+    .where(eq(conversations.userId, userId))
     .groupBy(conversations.id)
     .orderBy(desc(conversations.updatedAt))
     .limit(limit);
 }
 
-export async function deleteConversation(conversationId: string): Promise<void> {
+export async function deleteConversation(userId: string, conversationId: string): Promise<void> {
   if (!isValidConversationId(conversationId)) return;
   const db = getDb();
   // messages / memories.source_conversation_id 由外键级联(SET NULL / CASCADE)处理
-  await db.delete(conversations).where(eq(conversations.id, conversationId));
+  await db
+    .delete(conversations)
+    .where(and(eq(conversations.id, conversationId), eq(conversations.userId, userId)));
 }
 
 /**
@@ -90,12 +111,17 @@ export async function deleteConversation(conversationId: string): Promise<void> 
  * 用途:切换人格/音色会新建会话记录,若来源会话还一条消息都没有,
  * 留在列表里就是一条"未命名会话"垃圾 —— 有内容则一律保留。
  */
-export async function discardIfEmpty(conversationId: string): Promise<boolean> {
+export async function discardIfEmpty(
+  userId: string,
+  conversationId: string,
+): Promise<boolean> {
   if (!isValidConversationId(conversationId)) return false;
   const db = getDb();
   const count = await countMessages(conversationId);
   if (count > 0) return false;
-  await db.delete(conversations).where(eq(conversations.id, conversationId));
+  await db
+    .delete(conversations)
+    .where(and(eq(conversations.id, conversationId), eq(conversations.userId, userId)));
   return true;
 }
 
@@ -121,13 +147,17 @@ export interface AppendResult {
   ids: string[];
 }
 
-/** 批量写入转写;空数组直接返回。 */
+/** 批量写入转写;空数组直接返回。会话不属于该用户时视为不存在,静默返回。 */
 export async function appendMessages(
+  userId: string,
   conversationId: string,
   entries: readonly MessageInput[],
 ): Promise<AppendResult> {
   if (!isValidConversationId(conversationId) || entries.length === 0) {
     return { total: await countMessages(conversationId), inserted: 0, ids: [] };
+  }
+  if (!(await conversationBelongsTo(userId, conversationId))) {
+    return { total: 0, inserted: 0, ids: [] };
   }
   const db = getDb();
   const clean = entries
@@ -166,8 +196,8 @@ export async function appendMessages(
 
 /** 该用户最近 N 条消息(跨会话),按时间正序 —— 用于新会话注入历史。 */
 export async function loadRecentMessages(
+  userId: string,
   limit: number,
-  userId: string = LOCAL_USER_ID,
 ): Promise<Array<{ role: string; content: string }>> {
   const db = getDb();
   const rows = await db
@@ -190,10 +220,12 @@ export interface TranscriptRow {
 
 /**
  * 取某会话的完整转写(按时间正序),供记忆抽取与字幕回显使用。
+ * 只认当前用户自己的会话;别人的会话 id 与不存在的 id 同样返回空。
  *
  * 一并带出 feedback:进入历史会话时要显示用户此前点过的赞/踩。
  */
 export async function loadTranscript(
+  userId: string,
   conversationId: string,
   limit: number,
 ): Promise<TranscriptRow[]> {
@@ -208,8 +240,11 @@ export async function loadTranscript(
       score: feedbackTable.score,
     })
     .from(messages)
+    .innerJoin(conversations, eq(messages.conversationId, conversations.id))
     .leftJoin(feedbackTable, eq(feedbackTable.messageId, messages.id))
-    .where(eq(messages.conversationId, conversationId))
+    .where(
+      and(eq(messages.conversationId, conversationId), eq(conversations.userId, userId)),
+    )
     .orderBy(desc(messages.createdAt))
     .limit(limit);
   return rows

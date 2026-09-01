@@ -12,11 +12,11 @@
  *      确认即定格,不可修改。
  *
  * 一次性语义(产品硬约束):
- *   - 滑块/音色相对所选人格有改动时,生成一份**快照型自建人格**入库
- *     (无库时降级为 CUSTOM_PERSONA_ID + 渲染后的本地文案),让"定格"有据可依;
+ *   - 滑块/音色相对所选人格有改动时,生成一份**快照型自建人格**入库;
  *   - 确认前弹 shadcn Dialog 明确告知不可修改(已弃用原生 confirm);
- *   - 确认后写 localStorage(settings + hatched 标记)→ 开新会话 → 进对话;
- *   - 已孵化过的浏览器再进本页直接回 /chat。
+ *   - 确认后服务端建 companion 记录(用户级一次性,数据库 UNIQUE 保证)
+ *     → 开新会话 → 进对话;
+ *   - 已孵化过的账号再进本页由服务端守卫直接回 /chat。
  */
 
 import Link from "next/link";
@@ -34,14 +34,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
-import { switchConversationAction } from "@/lib/memory/actions";
+import { completeHatchAction } from "@/lib/companion/actions";
 import { savePersonaAction } from "@/lib/persona/actions";
-import { completeHatch, isHatched } from "@/lib/persona/hatch-state";
-import { CUSTOM_PERSONA_ID, PERSONA_PRESETS } from "@/lib/persona/presets";
+import { PERSONA_PRESETS } from "@/lib/persona/presets";
 import { renderPersonaBody } from "@/lib/persona/render";
 import type { PersonaTraits, TraitKey } from "@/lib/persona/traits";
 import type { PersonaRecord } from "@/lib/persona/types";
-import { usePersonaSettings } from "@/lib/persona/use-settings";
 import { REALTIME_VOICES } from "@/lib/persona/voices";
 
 /** 展示的 5 个滑块(设计稿维度;closeness 属六维矩阵但本期不进孵化屏)。 */
@@ -85,7 +83,6 @@ export function HatchFlow({
 }) {
   const router = useRouter();
   const ball = useBall();
-  const { update } = usePersonaSettings();
 
   const bases = useMemo<HatchBase[]>(
     () => [
@@ -118,6 +115,7 @@ export function HatchFlow({
   const [traits, setTraits] = useState<PersonaTraits>(() => ({ ...bases[0].traits }));
   const [voice, setVoice] = useState<string>(bases[0].voice);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [previewState, setPreviewState] = useState<"idle" | "loading" | "playing" | "error">("idle");
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -126,10 +124,8 @@ export function HatchFlow({
   // 预设常量恒非空(5 个),bases 至少含预设 → 直接索引安全
   const base = bases.find((b) => b.id === baseId) ?? bases[0];
 
-  // 已孵化过的浏览器直接回对话(孵化是一次性的)
-  useEffect(() => {
-    if (isHatched()) router.replace("/chat");
-  }, [router]);
+  // 已孵化判定在服务端(hatch/page.tsx 查 companion 后 redirect),
+  // 客户端不再依赖 localStorage 标记。
 
   function switchBase(id: string) {
     const next = bases.find((b) => b.id === id);
@@ -230,9 +226,8 @@ export function HatchFlow({
 
     setSaving(true);
 
-    // 有改动 → 快照成自建人格定格;无库退化为本地自定义文案
+    // 有改动 → 快照成自建人格定格;保存失败(未登录/库异常)则中止孵化
     let personaId = base.id;
-    let customInstructions = "";
     if (dirty) {
       const savedId = await savePersonaAction({
         draft: {
@@ -245,29 +240,24 @@ export function HatchFlow({
           boundaries: base.boundaries,
         },
       });
-      if (savedId !== null) {
-        personaId = savedId;
-      } else {
-        personaId = CUSTOM_PERSONA_ID;
-        customInstructions = renderPersonaBody({
-          name: base.name,
-          backstory: base.backstory,
-          boundaries: base.boundaries,
-          traits,
-        });
+      if (savedId === null) {
+        setSaving(false);
+        setError("定格失败了,稍后再试一次。");
+        ball.flash("alert", 1600);
+        return;
       }
+      personaId = savedId;
     }
-
-    update({ personaId, voice, customInstructions });
-    completeHatch({ personaId, voice });
 
     ball.swirl();
     ball.setBallState("idle");
     ball.setGazeDir(null);
 
     try {
-      const newId = await switchConversationAction({
+      // 服务端建 companion(一次性定格)+ 开新会话(人格/音色以服务端写入为准)
+      const newId = await completeHatchAction({
         personaId,
+        personaName: base.name,
         voice,
         fromConversationId: null,
       });
@@ -456,6 +446,7 @@ export function HatchFlow({
               未配置数据库时,新的人格改动以本地方式定格,不会落库。
             </p>
           )}
+          {error !== null ? <p className="pt-2 text-center text-xs text-[#FF8A80]">{error}</p> : null}
         </div>
 
         {/* 孵化确认弹窗(原生 confirm 已弃用,统一 shadcn Dialog) */}

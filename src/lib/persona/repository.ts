@@ -17,7 +17,7 @@
 
 import { and, desc, eq } from "drizzle-orm";
 import { getDb, isDatabaseConfigured } from "@/lib/db/client";
-import { personas, LOCAL_USER_ID } from "@/lib/db/schema";
+import { personas } from "@/lib/db/schema";
 import { PERSONA_PRESETS } from "./presets";
 import {
   isValidPersonaId,
@@ -65,14 +65,14 @@ function toRecord(row: typeof personas.$inferSelect): PersonaRecord {
 }
 
 /** 列出全部可用人格:预设在前(按预设顺序),自建在后(按更新时间倒序)。 */
-export async function listPersonas(): Promise<PersonaRecord[]> {
+export async function listPersonas(userId: string): Promise<PersonaRecord[]> {
   if (!isDatabaseConfigured()) return presetRecords();
 
   try {
     const rows = await getDb()
       .select()
       .from(personas)
-      .where(eq(personas.userId, LOCAL_USER_ID))
+      .where(eq(personas.userId, userId))
       .orderBy(desc(personas.updatedAt));
 
     const presets: PersonaRecord[] = [];
@@ -102,7 +102,7 @@ export async function listPersonas(): Promise<PersonaRecord[]> {
  * 按对外 id 取人格。
  * 预设 id 走 archetype 查询,自建 id 走主键查询;查不到返回 null。
  */
-export async function getPersona(id: string): Promise<PersonaRecord | null> {
+export async function getPersona(userId: string, id: string): Promise<PersonaRecord | null> {
   if (!isDatabaseConfigured()) {
     return presetRecords().find((p) => p.id === id) ?? null;
   }
@@ -113,8 +113,8 @@ export async function getPersona(id: string): Promise<PersonaRecord | null> {
       .from(personas)
       .where(
         isValidPersonaId(id)
-          ? and(eq(personas.id, id), eq(personas.userId, LOCAL_USER_ID))
-          : and(eq(personas.archetype, id), eq(personas.userId, LOCAL_USER_ID)),
+          ? and(eq(personas.id, id), eq(personas.userId, userId))
+          : and(eq(personas.archetype, id), eq(personas.userId, userId)),
       )
       .limit(1);
     return row === undefined ? null : toRecord(row);
@@ -138,7 +138,7 @@ export function normalizeDraft(input: PersonaDraft): PersonaDraft {
 }
 
 /** 新建人格,返回新 id。 */
-export async function createPersona(draft: PersonaDraft): Promise<string | null> {
+export async function createPersona(userId: string, draft: PersonaDraft): Promise<string | null> {
   if (!isDatabaseConfigured()) return null;
   const clean = normalizeDraft(draft);
   if (clean.name === "") return null;
@@ -146,7 +146,7 @@ export async function createPersona(draft: PersonaDraft): Promise<string | null>
   const [row] = await getDb()
     .insert(personas)
     .values({
-      userId: LOCAL_USER_ID,
+      userId,
       name: clean.name,
       emoji: clean.emoji,
       tagline: clean.tagline,
@@ -162,7 +162,11 @@ export async function createPersona(draft: PersonaDraft): Promise<string | null>
 }
 
 /** 更新自建人格。预设一律拒绝(只读模板,要走"另存为副本")。 */
-export async function updatePersona(id: string, draft: PersonaDraft): Promise<boolean> {
+export async function updatePersona(
+  userId: string,
+  id: string,
+  draft: PersonaDraft,
+): Promise<boolean> {
   if (!isDatabaseConfigured() || !isValidPersonaId(id)) return false;
   const clean = normalizeDraft(draft);
   if (clean.name === "") return false;
@@ -173,7 +177,7 @@ export async function updatePersona(id: string, draft: PersonaDraft): Promise<bo
     .where(
       and(
         eq(personas.id, id),
-        eq(personas.userId, LOCAL_USER_ID),
+        eq(personas.userId, userId),
         // 双保险:即使 id 是 uuid 也不会误改预设
         eq(personas.isPreset, false),
       ),
@@ -183,15 +187,44 @@ export async function updatePersona(id: string, draft: PersonaDraft): Promise<bo
 }
 
 /** 删除自建人格。预设拒绝。 */
-export async function deletePersona(id: string): Promise<boolean> {
+export async function deletePersona(userId: string, id: string): Promise<boolean> {
   if (!isDatabaseConfigured() || !isValidPersonaId(id)) return false;
   const result = await getDb()
     .delete(personas)
     .where(
-      and(eq(personas.id, id), eq(personas.userId, LOCAL_USER_ID), eq(personas.isPreset, false)),
+      and(eq(personas.id, id), eq(personas.userId, userId), eq(personas.isPreset, false)),
     )
     .returning({ id: personas.id });
   return result.length > 0;
+}
+
+/**
+ * 为新注册用户播种 5 个预设人格(用户体系 step1 T5)。
+ *
+ * 幂等:`(user_id, archetype)` 上的 partial unique index + ON CONFLICT DO NOTHING,
+ * 重复调用安全。种子源是 `presets.ts` 的 TS 常量 —— 0002 迁移里的 SQL 种子段
+ * 已移除,自此预设只有这一个数据源。
+ */
+export async function seedPresetsForUser(userId: string): Promise<void> {
+  if (!isDatabaseConfigured()) return;
+  const db = getDb();
+  for (const preset of PERSONA_PRESETS) {
+    await db
+      .insert(personas)
+      .values({
+        userId,
+        name: preset.name,
+        emoji: preset.emoji,
+        tagline: preset.tagline,
+        archetype: preset.id,
+        traits: preset.traits,
+        voice: preset.voice,
+        backstory: preset.instructions,
+        boundaries: "",
+        isPreset: true,
+      })
+      .onConflictDoNothing();
+  }
 }
 
 /** 新建人格的初始草稿:中性 traits + 默认音色。 */

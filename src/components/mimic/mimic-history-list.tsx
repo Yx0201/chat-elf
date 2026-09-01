@@ -11,7 +11,6 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { BallAnchor, useBall } from "@/components/mimic/ball/ball-context";
 import { deleteConversationAction, startConversationAction } from "@/lib/memory/actions";
-import { usePersonaSettings } from "@/lib/persona/use-settings";
 
 export interface HistorySession {
   id: string;
@@ -42,7 +41,6 @@ export function MimicHistoryList({
 }) {
   const router = useRouter();
   const ball = useBall();
-  const { settings } = usePersonaSettings();
   const [entering, setEntering] = useState(false);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -110,8 +108,6 @@ export function MimicHistoryList({
           <span className="text-base font-semibold text-[#1A1A1A]">Chat Elf · 历史</span>
         </div>
         <form action={startConversationAction}>
-          <input type="hidden" name="persona" value={settings.personaId} />
-          <input type="hidden" name="voice" value={settings.voice ?? ""} />
           <button
             type="submit"
             disabled={entering}

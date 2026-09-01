@@ -7,7 +7,7 @@
 
 import { and, desc, eq } from "drizzle-orm";
 import { getDb, isDatabaseConfigured } from "@/lib/db/client";
-import { memories, LOCAL_USER_ID } from "@/lib/db/schema";
+import { memories } from "@/lib/db/schema";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -27,7 +27,7 @@ export function isValidMemoryId(id: string): boolean {
 }
 
 /** 列出全部活跃记忆(最近确认过的在前)。 */
-export async function listMemories(): Promise<MemoryListItem[]> {
+export async function listMemories(userId: string): Promise<MemoryListItem[]> {
   if (!isDatabaseConfigured()) return [];
   try {
     return await getDb()
@@ -41,7 +41,7 @@ export async function listMemories(): Promise<MemoryListItem[]> {
         lastConfirmedAt: memories.lastConfirmedAt,
       })
       .from(memories)
-      .where(and(eq(memories.userId, LOCAL_USER_ID), eq(memories.archived, false)))
+      .where(and(eq(memories.userId, userId), eq(memories.archived, false)))
       .orderBy(desc(memories.lastConfirmedAt), desc(memories.createdAt));
   } catch (error) {
     console.error("[memory] 读取记忆列表失败:", error instanceof Error ? error.message : error);
@@ -56,11 +56,11 @@ export async function listMemories(): Promise<MemoryListItem[]> {
  * (Replika memory editor 模式 + 个人信息删除权),语义是"彻底忘掉",
  * 不是"暂时不检索"。软删除反而会在数据库里留下用户要求删掉的内容。
  */
-export async function deleteMemory(id: string): Promise<boolean> {
+export async function deleteMemory(userId: string, id: string): Promise<boolean> {
   if (!isDatabaseConfigured() || !isValidMemoryId(id)) return false;
   const rows = await getDb()
     .delete(memories)
-    .where(and(eq(memories.id, id), eq(memories.userId, LOCAL_USER_ID)))
+    .where(and(eq(memories.id, id), eq(memories.userId, userId)))
     .returning({ id: memories.id });
   return rows.length > 0;
 }

@@ -8,15 +8,19 @@
 import { notFound } from "next/navigation";
 import { PersonaEditor } from "@/components/persona/persona-editor";
 import { PersonaPageHeader } from "@/components/persona/persona-page-header";
+import { requirePageUserId } from "@/lib/auth/session";
+import { getCompanion } from "@/lib/companion/repository";
 import { isDatabaseConfigured } from "@/lib/db/client";
 import { getPersona } from "@/lib/persona/repository";
 
 export const dynamic = "force-dynamic";
 
 export default async function PersonaEditPage({ params }: PageProps<"/persona/[personaId]">) {
+  const userId = await requirePageUserId();
   const { personaId } = await params;
-  const persona = await getPersona(personaId);
+  const persona = await getPersona(userId, personaId);
   if (persona === null) notFound();
+  const companionPersonaId = (await getCompanion(userId))?.personaId ?? null;
 
   const persistence = isDatabaseConfigured();
 
@@ -28,6 +32,7 @@ export default async function PersonaEditPage({ params }: PageProps<"/persona/[p
         <div className="mt-6 pb-8">
           <PersonaEditor
             personaId={persona.id}
+            companionPersonaId={companionPersonaId}
             initial={persona}
             // 无数据库时预设仍可浏览(走常量降级),但不能改也不能复制
             readOnly={persona.isPreset || !persistence}

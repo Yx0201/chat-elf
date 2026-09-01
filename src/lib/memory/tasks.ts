@@ -13,7 +13,7 @@ import { cosineDistance } from "drizzle-orm";
 import { z } from "zod";
 import { getDashScopeProvider, isAiConfigured, TEXT_MODEL } from "@/lib/ai/provider";
 import { getDb, isDatabaseConfigured } from "@/lib/db/client";
-import { memories, LOCAL_USER_ID } from "@/lib/db/schema";
+import { memories } from "@/lib/db/schema";
 import { loadTranscript } from "./conversations";
 import { embedText } from "./embedding";
 
@@ -98,6 +98,7 @@ function clamp01(value: number): number {
  * 否则"用户说了两次同一件事"会被写成两条。
  */
 export async function upsertMemory(
+  userId: string,
   candidate: CandidateMemory,
   conversationId: string | null,
   source: MemorySource = "batch",
@@ -115,7 +116,7 @@ export async function upsertMemory(
       .from(memories)
       .where(
         and(
-          eq(memories.userId, LOCAL_USER_ID),
+          eq(memories.userId, userId),
           eq(memories.archived, false),
           sql`${memories.embedding} is not null`,
           gt(similarity, DUPLICATE_SIMILARITY),
@@ -139,7 +140,7 @@ export async function upsertMemory(
   }
 
   await db.insert(memories).values({
-    userId: LOCAL_USER_ID,
+    userId,
     content,
     category: candidate.category,
     importance: clamp01(candidate.importance),
@@ -154,10 +155,10 @@ export async function upsertMemory(
 }
 
 /** 对一个会话执行记忆抽取,返回**新增**的记忆条数(刷新旧记忆不计入)。 */
-export async function extractMemories(conversationId: string): Promise<number> {
+export async function extractMemories(userId: string, conversationId: string): Promise<number> {
   if (!isDatabaseConfigured() || !isAiConfigured()) return 0;
 
-  const transcript = await loadTranscript(conversationId, TRANSCRIPT_LIMIT);
+  const transcript = await loadTranscript(userId, conversationId, TRANSCRIPT_LIMIT);
   if (transcript.length < MIN_TRANSCRIPT_MESSAGES) return 0;
 
   const text = transcript
@@ -181,7 +182,7 @@ export async function extractMemories(conversationId: string): Promise<number> {
   let written = 0;
   for (const candidate of candidates) {
     try {
-      if (await upsertMemory(candidate, conversationId)) written += 1;
+      if (await upsertMemory(userId, candidate, conversationId)) written += 1;
     } catch (error) {
       console.error("[memory] 记忆写入失败:", error instanceof Error ? error.message : error);
     }

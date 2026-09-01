@@ -8,6 +8,7 @@
  */
 
 import { revalidatePath } from "next/cache";
+import { requireActionUserId } from "@/lib/auth/session";
 import {
   createPersona,
   deletePersona,
@@ -34,14 +35,17 @@ export interface SavePersonaInput {
  * 想改预设必须"另存为副本"(用户决策项 3 的选定方案)。
  */
 export async function savePersonaAction(input: SavePersonaInput): Promise<string | null> {
+  const userId = await requireActionUserId();
+  if (userId === null) return null;
+
   if (input.id === undefined) {
-    const id = await createPersona(input.draft);
+    const id = await createPersona(userId, input.draft);
     if (id !== null) revalidatePersona();
     return id;
   }
   if (!isValidPersonaId(input.id)) return null;
 
-  const ok = await updatePersona(input.id, input.draft);
+  const ok = await updatePersona(userId, input.id, input.draft);
   if (ok) revalidatePersona();
   return ok ? input.id : null;
 }
@@ -53,10 +57,13 @@ export async function savePersonaAction(input: SavePersonaInput): Promise<string
  * 且与"改坏了还有原版可对照"这个目的保持一致。
  */
 export async function duplicatePersonaAction(id: string): Promise<string | null> {
-  const source = await getPersona(id);
+  const userId = await requireActionUserId();
+  if (userId === null) return null;
+
+  const source = await getPersona(userId, id);
   if (source === null) return null;
 
-  const newId = await createPersona({
+  const newId = await createPersona(userId, {
     name: `${source.name} 的副本`,
     emoji: source.emoji,
     tagline: source.tagline,
@@ -70,8 +77,9 @@ export async function duplicatePersonaAction(id: string): Promise<string | null>
 }
 
 export async function deletePersonaAction(id: string): Promise<boolean> {
-  if (!isValidPersonaId(id)) return false;
-  const ok = await deletePersona(id);
+  const userId = await requireActionUserId();
+  if (userId === null || !isValidPersonaId(id)) return false;
+  const ok = await deletePersona(userId, id);
   if (ok) revalidatePersona();
   return ok;
 }

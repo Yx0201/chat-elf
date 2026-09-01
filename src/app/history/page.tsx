@@ -10,6 +10,7 @@
  */
 
 import { MimicHistoryList } from "@/components/mimic/mimic-history-list";
+import { requirePageUserId } from "@/lib/auth/session";
 import { isDatabaseConfigured } from "@/lib/db/client";
 import { listConversations } from "@/lib/memory/conversations";
 import { listPersonas } from "@/lib/persona/repository";
@@ -17,11 +18,12 @@ import { listPersonas } from "@/lib/persona/repository";
 export const dynamic = "force-dynamic";
 
 export default async function HistoryPage() {
+  const userId = await requirePageUserId();
   const persistence = isDatabaseConfigured();
   // 人格名查不到(预设之外/已删除)就不显示 —— 副标题只留时间与条数
-  const conversations = persistence ? await listConversations() : [];
+  const conversations = persistence ? await listConversations(userId) : [];
   const personaNames = new Map(
-    (await listPersonas()).map((persona) => [persona.id, persona.name] as const),
+    (await listPersonas(userId)).map((persona) => [persona.id, persona.name] as const),
   );
 
   const sessions = conversations.map((conversation) => ({

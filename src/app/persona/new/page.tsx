@@ -8,10 +8,14 @@
 
 import { PersonaEditor } from "@/components/persona/persona-editor";
 import { PersonaPageHeader } from "@/components/persona/persona-page-header";
+import { requirePageUserId } from "@/lib/auth/session";
+import { getCompanion } from "@/lib/companion/repository";
 import { isDatabaseConfigured } from "@/lib/db/client";
 
-export default function NewPersonaPage() {
+export default async function NewPersonaPage() {
+  const userId = await requirePageUserId();
   const persistence = isDatabaseConfigured();
+  const companionPersonaId = (await getCompanion(userId))?.personaId ?? null;
 
   return (
     <div className="mimic-page min-h-dvh bg-[#F6F5F4] px-5 py-8 sm:py-12">
@@ -25,7 +29,7 @@ export default function NewPersonaPage() {
         ) : null}
 
         <div className="mt-6 pb-8">
-          <PersonaEditor personaId={null} initial={null} readOnly={false} canDelete={false} />
+          <PersonaEditor personaId={null} companionPersonaId={companionPersonaId} initial={null} readOnly={false} canDelete={false} />
         </div>
       </div>
     </div>

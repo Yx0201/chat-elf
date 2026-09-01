@@ -11,6 +11,7 @@
  */
 
 import { MimicMemoryList } from "@/components/mimic/mimic-memory-list";
+import { requirePageUserId } from "@/lib/auth/session";
 import { isDatabaseConfigured } from "@/lib/db/client";
 import { getProfile } from "@/lib/memory/profile";
 import { listMemories, type MemoryListItem } from "@/lib/memory/store";
@@ -19,9 +20,10 @@ import { listMemories, type MemoryListItem } from "@/lib/memory/store";
 export const dynamic = "force-dynamic";
 
 export default async function MemoryPage() {
+  const userId = await requirePageUserId();
   const persistence = isDatabaseConfigured();
   const [memories, profile] = persistence
-    ? await Promise.all([listMemories(), getProfile()])
+    ? await Promise.all([listMemories(userId), getProfile(userId)])
     : [[], null];
 
   return (

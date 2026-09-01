@@ -11,7 +11,6 @@
 
 import Link from "next/link";
 import type { PersonaRecord } from "@/lib/persona/types";
-import { usePersonaSettings } from "@/lib/persona/use-settings";
 
 function ChevronIcon() {
   return (
@@ -53,11 +52,13 @@ function PersonaRow({ persona, current }: { persona: PersonaRecord; current: boo
 export function PersonaList({
   presets,
   customs,
+  companionPersonaId,
 }: {
   presets: readonly PersonaRecord[];
   customs: readonly PersonaRecord[];
+  /** 孵化定格的人格 id(服务端 companion);标记"陪伴中",null = 未孵化 */
+  companionPersonaId: string | null;
 }) {
-  const { settings } = usePersonaSettings();
 
   return (
     <div className="flex flex-col gap-8">
@@ -68,7 +69,7 @@ export function PersonaList({
         <ul className="mt-2 overflow-hidden rounded-xl border border-[#E5E3DF] bg-white">
           {presets.map((persona) => (
             <li key={persona.id}>
-              <PersonaRow persona={persona} current={settings.personaId === persona.id} />
+              <PersonaRow persona={persona} current={companionPersonaId === persona.id} />
             </li>
           ))}
         </ul>
@@ -85,7 +86,7 @@ export function PersonaList({
           <ul className="mt-2 overflow-hidden rounded-xl border border-[#E5E3DF] bg-white">
             {customs.map((persona) => (
               <li key={persona.id}>
-                <PersonaRow persona={persona} current={settings.personaId === persona.id} />
+                <PersonaRow persona={persona} current={companionPersonaId === persona.id} />
               </li>
             ))}
           </ul>

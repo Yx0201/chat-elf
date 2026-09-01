@@ -13,7 +13,8 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { after } from "next/server";
-import { isDatabaseConfigured } from "@/lib/db/client";
+import { requireActionUserId } from "@/lib/auth/session";
+import { getCompanion } from "@/lib/companion/repository";
 import {
   appendMessages,
   createConversation,
@@ -30,33 +31,26 @@ import { extractMemories, upsertMemory } from "./tasks";
 /** 每积累这么多条消息触发一次会话中抽取;会话结束时再抽一次兜底。 */
 const EXTRACTION_EVERY_N_MESSAGES = 8;
 
-/** FormData 取字符串;空串与缺失一律视为 null(表单值是不可信输入)。 */
-function readStringField(formData: FormData, key: string): string | null {
-  const value = formData.get(key);
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed === "" ? null : trimmed;
-}
-
 /**
  * 新建会话并跳转。
  *
- * persona / voice 由客户端表单传入 —— 它们当前只存在 localStorage,服务端读不到,
- * 不传的话历史列表就显示不出人格名。
- *
- * step2 起 persona 的值域是「预设 archetype 或 personas 表 uuid」。只有后者
- * 才能写外键,判断交给 `createConversation` 里的 `isValidPersonaId`。
- *
- * 未配置数据库时退回占位会话(对话仍可用,只是不落库)。
+ * persona / voice 快照**服务端自取 companion**(用户体系 step1:客户端传的
+ * 人格不可信,且孵化定格后真源只有 companion)。未登录(会话过期)回登录页。
  *
  * 2026-08-31 UI 大一统后落点唯一:/chat/<id>(拟态球对话页)。
  */
-export async function startConversationAction(formData: FormData): Promise<void> {
-  const persona = readStringField(formData, "persona");
-  const voice = readStringField(formData, "voice");
+export async function startConversationAction(): Promise<void> {
+  const userId = await requireActionUserId();
+  if (userId === null) redirect("/");
 
-  if (!isDatabaseConfigured()) redirect("/chat/local-demo");
-  const id = await createConversation({ personaId: persona, persona, voice });
+  const companion = await getCompanion(userId);
+  if (companion === null) redirect("/hatch");
+
+  const id = await createConversation(userId, {
+    personaId: companion.personaId,
+    persona: companion.personaName,
+    voice: companion.voice,
+  });
   redirect(`/chat/${id}`);
 }
 
@@ -71,21 +65,24 @@ export async function startConversationAction(formData: FormData): Promise<void>
  * 顺带清理:来源会话若还没有任何转写就删掉,避免列表堆积空的"未命名会话"。
  * 已有内容的会话一律保留。
  *
- * @returns 新会话 id;未配置数据库时返回 null(此时设置已存进 localStorage,
- *          客户端留在原地即可 —— 重新开启通话就会带上新人格)
+ * 客户端传入的 personaId/voice 仅供会话快照;鉴权后数据归属一律取
+ * 服务端会话的 userId。
+ *
+ * @returns 新会话 id;未登录时返回 null
  */
 export async function switchConversationAction(input: {
   personaId: string;
   voice: string;
   fromConversationId: string | null;
 }): Promise<string | null> {
-  if (!isDatabaseConfigured()) return null;
+  const userId = await requireActionUserId();
+  if (userId === null) return null;
 
   if (input.fromConversationId !== null) {
-    await discardIfEmpty(input.fromConversationId);
+    await discardIfEmpty(userId, input.fromConversationId);
   }
 
-  const id = await createConversation({
+  const id = await createConversation(userId, {
     personaId: input.personaId,
     persona: input.personaId,
     voice: input.voice,
@@ -109,7 +106,8 @@ export async function appendMessagesAction(
   conversationId: string,
   entries: readonly MessageInput[],
 ): Promise<AppendMessagesResult> {
-  if (!isDatabaseConfigured() || !isValidConversationId(conversationId)) {
+  const userId = await requireActionUserId();
+  if (userId === null || !isValidConversationId(conversationId)) {
     return { ok: false, ids: [] };
   }
   if (entries.length === 0) return { ok: true, ids: [] };
@@ -118,7 +116,7 @@ export async function appendMessagesAction(
   let total = 0;
   let ids: string[] = [];
   try {
-    const result = await appendMessages(conversationId, entries);
+    const result = await appendMessages(userId, conversationId, entries);
     inserted = result.inserted;
     total = result.total;
     ids = result.ids;
@@ -131,7 +129,7 @@ export async function appendMessagesAction(
   if (inserted > 0) {
     const before = Math.floor((total - inserted) / EXTRACTION_EVERY_N_MESSAGES);
     const afterCount = Math.floor(total / EXTRACTION_EVERY_N_MESSAGES);
-    if (afterCount > before) after(() => extractMemories(conversationId));
+    if (afterCount > before) after(() => extractMemories(userId, conversationId));
   }
 
   return { ok: true, ids };
@@ -146,9 +144,10 @@ export async function submitFeedbackAction(
   messageId: string,
   score: 1 | -1,
 ): Promise<1 | -1 | null> {
-  if (!isDatabaseConfigured()) return null;
+  const userId = await requireActionUserId();
+  if (userId === null) return null;
   try {
-    return await rateMessage(messageId, score);
+    return await rateMessage(userId, messageId, score);
   } catch (error) {
     console.error("[feedback] 反馈写入失败:", error instanceof Error ? error.message : error);
     return null;
@@ -157,19 +156,21 @@ export async function submitFeedbackAction(
 
 /** 会话结束:兜底触发一次记忆抽取。 */
 export async function finishConversationAction(conversationId: string): Promise<void> {
-  if (!isDatabaseConfigured() || !isValidConversationId(conversationId)) return;
+  const userId = await requireActionUserId();
+  if (userId === null || !isValidConversationId(conversationId)) return;
   // 会话收尾:兜底抽一次记忆,再累加"已结束会话数"以触发画像整合(step3 T4)。
   // **顺序有意义** —— 先抽记忆再整画像,否则刚聊完的事要等下一轮才进画像。
   // 两者都是纯后台任务,排在响应之后,不阻塞返回。
   after(async () => {
-    await extractMemories(conversationId);
-    await noteConversationFinished();
+    await extractMemories(userId, conversationId);
+    await noteConversationFinished(userId);
   });
 }
 
 export async function deleteConversationAction(conversationId: string): Promise<void> {
-  if (!isDatabaseConfigured() || !isValidConversationId(conversationId)) return;
-  await deleteConversation(conversationId);
+  const userId = await requireActionUserId();
+  if (userId === null || !isValidConversationId(conversationId)) return;
+  await deleteConversation(userId, conversationId);
   revalidatePath("/history");
 }
 
@@ -178,8 +179,9 @@ export async function deleteConversationAction(conversationId: string): Promise<
  * 用户主动删除的语义是"彻底忘掉",不是"暂时不检索"。
  */
 export async function deleteMemoryAction(memoryId: string): Promise<boolean> {
-  if (!isDatabaseConfigured() || !isValidMemoryId(memoryId)) return false;
-  const ok = await deleteMemory(memoryId);
+  const userId = await requireActionUserId();
+  if (userId === null || !isValidMemoryId(memoryId)) return false;
+  const ok = await deleteMemory(userId, memoryId);
   if (ok) revalidatePath("/memory");
   return ok;
 }
@@ -196,7 +198,8 @@ export async function rememberFactAction(input: {
   importance: number;
   conversationId: string | null;
 }): Promise<boolean> {
-  if (!isDatabaseConfigured()) return false;
+  const userId = await requireActionUserId();
+  if (userId === null) return false;
   const conversationId =
     input.conversationId !== null && isValidConversationId(input.conversationId)
       ? input.conversationId
@@ -204,6 +207,7 @@ export async function rememberFactAction(input: {
 
   try {
     const added = await upsertMemory(
+      userId,
       {
         content: input.content,
         category: input.category,
@@ -230,8 +234,9 @@ export async function rememberFactAction(input: {
  * `noteConversationFinished`(走 after(),不阻塞)刻意不同。
  */
 export async function refreshProfileAction(): Promise<boolean> {
-  if (!isDatabaseConfigured()) return false;
-  const summary = await refreshProfile();
+  const userId = await requireActionUserId();
+  if (userId === null) return false;
+  const summary = await refreshProfile(userId);
   if (summary !== null) revalidatePath("/memory");
   return summary !== null;
 }

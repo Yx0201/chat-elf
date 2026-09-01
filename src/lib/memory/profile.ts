@@ -20,7 +20,7 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { getDashScopeProvider, isAiConfigured, TEXT_MODEL } from "@/lib/ai/provider";
 import { getDb, isDatabaseConfigured } from "@/lib/db/client";
-import { memories, userProfile, LOCAL_USER_ID } from "@/lib/db/schema";
+import { memories, userProfile } from "@/lib/db/schema";
 
 /** 距上次整合以来,结束多少个会话才重写一次画像(spec 待决策项 2 的选定值)。 */
 export const PROFILE_REFRESH_EVERY = 3;
@@ -75,13 +75,13 @@ const PROFILE_SYSTEM = `你是用户画像整合器。下面是 AI 语音陪伴�
  会校验提示词里有没有出现 "json" 这个词,没有就直接报 400。)`;
 
 /** 读当前画像;没有记录时返回 null(而不是空对象 —— 让调用方能区分"还没整合过")。 */
-export async function getProfile(): Promise<UserProfile | null> {
+export async function getProfile(userId: string): Promise<UserProfile | null> {
   if (!isDatabaseConfigured()) return null;
   try {
     const [row] = await getDb()
       .select()
       .from(userProfile)
-      .where(eq(userProfile.userId, LOCAL_USER_ID))
+      .where(eq(userProfile.userId, userId))
       .limit(1);
     if (row === undefined || row.summary.trim() === "") return null;
     return {
@@ -109,7 +109,7 @@ function parseTraits(value: unknown): Record<string, string> {
 }
 
 /** 拼出喂给整合模型的碎片文本(带时间,供冲突消解)。 */
-async function loadSourceText(): Promise<string | null> {
+async function loadSourceText(userId: string): Promise<string | null> {
   const rows = await getDb()
     .select({
       content: memories.content,
@@ -117,7 +117,7 @@ async function loadSourceText(): Promise<string | null> {
       createdAt: memories.createdAt,
     })
     .from(memories)
-    .where(and(eq(memories.userId, LOCAL_USER_ID), eq(memories.archived, false)))
+    .where(and(eq(memories.userId, userId), eq(memories.archived, false)))
     // 重要度优先,同等重要度下新的优先
     .orderBy(desc(memories.importance), desc(memories.createdAt))
     .limit(MAX_SOURCE_MEMORIES);
@@ -136,12 +136,12 @@ async function loadSourceText(): Promise<string | null> {
  * 立刻重写画像(不管有没有到阈值)。导出是为了手动触发/将来做定时任务。
  * 返回新的速写;失败返回 null。
  */
-export async function refreshProfile(): Promise<string | null> {
+export async function refreshProfile(userId: string): Promise<string | null> {
   if (!isDatabaseConfigured() || !isAiConfigured()) return null;
 
   let source: string | null;
   try {
-    source = await loadSourceText();
+    source = await loadSourceText(userId);
   } catch (error) {
     console.error("[profile] 读取碎片记忆失败:", error instanceof Error ? error.message : error);
     return null;
@@ -168,7 +168,7 @@ export async function refreshProfile(): Promise<string | null> {
     await getDb()
       .insert(userProfile)
       .values({
-        userId: LOCAL_USER_ID,
+        userId,
         summary,
         traits,
         pendingConversations: 0,
@@ -193,13 +193,13 @@ export async function refreshProfile(): Promise<string | null> {
  *
  * 计数先落库再整合 —— 即使整合失败,计数也不会丢,下次会话结束后会再试。
  */
-export async function noteConversationFinished(): Promise<void> {
+export async function noteConversationFinished(userId: string): Promise<void> {
   if (!isDatabaseConfigured()) return;
   const db = getDb();
   try {
     const [row] = await db
       .insert(userProfile)
-      .values({ userId: LOCAL_USER_ID, pendingConversations: 1 })
+      .values({ userId, pendingConversations: 1 })
       // 没有记录时插入;已有记录则 +1
       .onConflictDoUpdate({
         target: userProfile.userId,
@@ -213,5 +213,5 @@ export async function noteConversationFinished(): Promise<void> {
     console.error("[profile] 累加会话计数失败:", error instanceof Error ? error.message : error);
     return;
   }
-  await refreshProfile();
+  await refreshProfile(userId);
 }

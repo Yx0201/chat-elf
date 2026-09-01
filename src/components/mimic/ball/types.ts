@@ -17,7 +17,8 @@ export type BallState =
   | "orbit" // 路由转场（轨道环）
   | "hexagon" // 性格设置态
   | "comet" // 历史穿梭（拖尾）
-  | "alert" // 错误提醒（感叹号）
+  | "alert" // 错误提醒（斜置警示条 + 泪滴点）
+  | "exclaim" // 直立感叹号（竖条 + 圆点,bloub 图标样式的"!"）
   | "shy" // 羞怯（说话轮换之一，bloub timide）
   | "doubt" // 怀疑（说话轮换之二，bloub méfiant）
   | "calm"; // 平静（说话轮换之三，bloub neutre 眼型）

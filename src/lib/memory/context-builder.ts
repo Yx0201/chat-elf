@@ -14,7 +14,7 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { cosineDistance } from "drizzle-orm";
 import { isAiConfigured } from "@/lib/ai/provider";
 import { getDb, isDatabaseConfigured } from "@/lib/db/client";
-import { memories, LOCAL_USER_ID } from "@/lib/db/schema";
+import { memories } from "@/lib/db/schema";
 import { loadRecentMessages } from "./conversations";
 import { embedText } from "./embedding";
 import { getProfile } from "./profile";
@@ -51,6 +51,7 @@ function scoreOf(memory: RecalledMemory, now: number): number {
 }
 
 async function recallMemories(
+  userId: string,
   recent: readonly { role: string; content: string }[],
 ): Promise<RecalledMemory[]> {
   const db = getDb();
@@ -77,7 +78,7 @@ async function recallMemories(
       .from(memories)
       .where(
         and(
-          eq(memories.userId, LOCAL_USER_ID),
+          eq(memories.userId, userId),
           eq(memories.archived, false),
           sql`${memories.embedding} is not null`,
         ),
@@ -96,7 +97,7 @@ async function recallMemories(
       importance: memories.importance,
     })
     .from(memories)
-    .where(and(eq(memories.userId, LOCAL_USER_ID), eq(memories.archived, false)))
+    .where(and(eq(memories.userId, userId), eq(memories.archived, false)))
     .orderBy(desc(memories.importance), desc(memories.createdAt))
     .limit(CANDIDATE_POOL);
   return rows.map((r) => ({ ...r, base: r.importance }));
@@ -114,18 +115,17 @@ async function touchMemories(ids: readonly string[]): Promise<void> {
 /**
  * 组装注入到 instructions 的记忆上下文段落。
  *
- * 无数据库配置 / 无历史 / 无记忆 / 查询报错时一律返回空字符串 ——
- * 记忆是增强项,不能让缺少 DATABASE_URL 变成页面 500。
+ * 查询报错时返回空字符串 —— 记忆是增强项,失败不能让对话页 500。
  */
-export async function buildMemoryContext(): Promise<string> {
+export async function buildMemoryContext(userId: string): Promise<string> {
   if (!isDatabaseConfigured()) return "";
 
   try {
-    const recent = await loadRecentMessages(RECENT_MESSAGE_LIMIT);
-    const pool = await recallMemories(recent);
+    const recent = await loadRecentMessages(userId, RECENT_MESSAGE_LIMIT);
+    const pool = await recallMemories(userId, recent);
     // 画像层(step3 T4)是 LLM 整合过的、已消解冲突的用户速写,
     // 比碎片记忆更凝练可靠,故注入优先级最高
-    const profile = await getProfile();
+    const profile = await getProfile(userId);
     const now = Date.now();
     const top = [...pool].sort((a, b) => scoreOf(b, now) - scoreOf(a, now)).slice(0, RECALL_LIMIT);
 

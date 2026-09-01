@@ -50,6 +50,7 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 - **实施会话的职责边界**：开工前按顺序读 AGENTS.md → ARCHITECTURE.md → `Memory/` 最新存档 → 对应 spec；只按 spec 实施并在「实施记录」小节追加进度（日期 / 完成任务 / 备注）；遇到 spec 未覆盖的决策点必须停下询问用户，不得自行扩大范围或改写需求。
 - **spec 的收尾**：全部任务完成并验收后，将文件移入 `specCoding/done/` 归档。
 
+
 ## 进度保存规则
 
 每当用户说**保存进度** 或者执行 `git push` 时，立即在项目根目录 `Memory/` 文件夹中保存当前工作进度：

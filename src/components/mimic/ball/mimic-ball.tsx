@@ -66,6 +66,7 @@ const STATE_LABEL: Record<BallState, string> = {
   hexagon: "性格",
   comet: "历史",
   alert: "出错了",
+  exclaim: "感叹号",
   shy: "羞怯",
   doubt: "怀疑",
   calm: "平静",

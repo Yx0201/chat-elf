@@ -10,7 +10,8 @@
 | --- | --- |
 | 包管理器 | **pnpm**（唯一包管理器，不要产生 package-lock.json / yarn.lock） |
 | 应用框架 | **Next.js**（App Router + TypeScript，`create-next-app --typescript --app --tailwind` 基线） |
-| 持久化 | **PostgreSQL**：本地开发用本机实例，上线切换 Neon（2026-08-29 修订，详见「持久化架构」）；Supabase 降级为将来 Auth 的候选项，暂不引入 |
+| 持久化 | **PostgreSQL**：本地开发用本机实例，上线切换 Neon（2026-08-29 修订，详见「持久化架构」） |
+| 账号体系 | **Better Auth**（2026-09-01 选定，用户体系 step1）。邮箱+密码（**登录/注册分开展示**：登录页内文字按钮切换注册表单，注册成功回登录页登录——`autoSignIn: false`；**注册邀请码**：`invite_codes` 表准入，服务端 hook 强制校验，只挡注册不挡登录）、DB session、scrypt 密码哈希、Drizzle 官方 adapter。headless 不捆绑 UI —— 拟态球登录页原样保留。排除项：NextAuth v5（未出 beta 且 Auth.js 已并入 Better Auth）、Lucia（2025-03 废弃）、Clerk（数据出库+MAU 限制+自带 UI 冲突）、Supabase Auth（曾列候选，落选：会把鉴权拆成第二服务）、自研（安全细节自担） |
 | 数据库查询层 | **Drizzle ORM**（2026-08-29 选定）。只用于**查询侧类型安全**，迁移保持手写 SQL，故不引入 drizzle-kit、不做 codegen；底层驱动 `pg`。排除 Prisma 的决定性理由：其对 `vector` 列只能声明 `Unsupported()`，语义检索必须回落 `$queryRaw` + `::text` 转换，ORM 查询 API 在核心场景失效而查询引擎/codegen 代价照付 |
 | 对话模型 | 双通道（2026-08-28 修订）：默认 **Token Plan** 订阅通道，模型 `qwen-audio-3.0-realtime-plus`（Qwen-Audio-Realtime 系列）；保留 **DashScope** 业务空间通道，模型 `qwen3.5-omni-flash-realtime`。由 `REALTIME_PROVIDER` 环境变量切换（`tokenplan` \| `dashscope`） |
 | 运行时语言 | TypeScript strict，前后端同构于 Next.js |
@@ -19,7 +20,7 @@
 | 类型/数据校验 | **zod** |
 | Agent 框架 | **Vercel AI SDK**（仅服务端文本型 agentic 任务；实时语音链路不使用，见下文） |
 
-分工原则：能用 Next.js 解决的（页面、Route Handler、Server Actions）不用额外服务；只有 Next.js 做不了的能力（持久化、鉴权、文件存储）才落到外部服务。当前持久化为 PostgreSQL（本地 → Neon），数据库访问一律走 Next.js 服务端 —— **读走 Server Component 直取，写走 Server Action，不建 REST 数据路由**（实时信令转发是唯一保留的 Route Handler）。
+分工原则：能用 Next.js 解决的（页面、Route Handler、Server Actions）不用额外服务；只有 Next.js 做不了的能力（持久化、鉴权、文件存储）才落到外部服务。当前持久化为 PostgreSQL（本地 → Neon），数据库访问一律走 Next.js 服务端 —— **读走 Server Component 直取，写走 Server Action，不建 REST 数据路由**。Route Handler 例外清单（2026-09-01 修订）：①实时信令转发 `/api/realtime/session`；②音色试听合成 `/api/voice-preview`；③Better Auth 端点 `/api/auth/[...all]`（注册/登录/退出的 cookie 设置与 CSRF 防护依赖标准 HTTP 流程，属框架标配）。
 
 依赖引入原则【已确认】：需要组件库、状态管理、类型校验时，首选分别是 shadcn/ui、zustand、zod，不得引入同类替代品；且一律按需下载——写到哪个功能才装哪个依赖，不做预装囤积。
 
@@ -143,7 +144,9 @@ DashScope WebRTC 信令端点形态（以官方文档为准）：
 
 ## 持久化架构【已确认，2026-08-29 修订】
 
-选定路线：**本地 PostgreSQL 开发 → 上线切换 Neon**。依据（2026-08-29 调研核实）：本地 Postgres、Neon、其他托管 Postgres 的协议/SQL/pgvector 语义一致，切换即改 `DATABASE_URL` 与连接配置，不是代码重写；且当前无账号体系，Supabase 的核心价值（Auth + RLS）无从发挥——数据库访问一律走 Next.js 服务端可信通道，RLS 整体不需要，`user_id` 单用户阶段硬编码 `local-user`。Supabase 保留为将来引入账号体系时 Auth 的候选项，与存储层解耦。
+选定路线：**本地 PostgreSQL 开发 → 上线切换 Neon**。依据（2026-08-29 调研核实）：本地 Postgres、Neon、其他托管 Postgres 的协议/SQL/pgvector 语义一致，切换即改 `DATABASE_URL` 与连接配置，不是代码重写。账号体系已于 2026-09-01 落地（Better Auth，直接使用自有库），当年"无账号体系、RLS 整体不需要、`user_id` 硬编码 `local-user`"的单用户假设全部作废：多用户数据隔离由**服务端会话 + 查询层归属过滤**承担（`requirePageUserId` / `requireActionUserId` + 各查询的 `WHERE user_id`），仍不启用 RLS（访问一律走 Next.js 服务端可信通道）。
+
+- **强制有库（2026-09-01，用户体系 step1 决策 3）**：页面层 `requirePageUserId()` 在未配置 `DATABASE_URL` 时直接抛 `DatabaseConfigError`（fail fast，"无库演示模式"已废除）；lib 层约 30 处 `isDatabaseConfigured()` 防御分支**保留为运行时兜底**（DB 闪断时返回空结果优于崩页面），正常流程不再触达。
 
 - **本地**：用本机已安装的 PostgreSQL 实例即可，**不必起 Docker**。
   ⚠️ **事实更正（2026-08-29 实测）**：本节原写"官方 postgres 镜像与 Homebrew postgres 均不含 vector 扩展，故须用 `pgvector/pgvector` Docker 镜像"。实测本机 Homebrew **PostgreSQL 17.5** 的 `pg_available_extensions` 中已有 **vector 0.8.0**，直接 `CREATE EXTENSION IF NOT EXISTS vector;` 即可。Docker 镜像在干净环境或其它机器上仍是可行方案，但不是必需项。
@@ -162,7 +165,7 @@ DashScope WebRTC 信令端点形态（以官方文档为准）：
 - 打断处理（barge-in）：监听 `input_audio_buffer.speech_started` 事件——客户端对本地播放做音量淡出后重挂流（清空残余缓冲）并更新 UI 状态；同时对 in-flight 响应显式发送 `response.cancel`（文档唯一保证的取消手段），确保服务端停止生成旧答案
 - 开启输入音频转写（用户语音→文字字幕），输出侧消费 `response.audio_transcript.delta/done` 作为助手字幕
 - `session.update` **发两次**（2026-08-30 起）：第一条承载 modalities / voice / instructions / turn_detection 等核心配置，第二条只带 `tools`（Function Calling）。拆开发是为了隔离风险 —— 工具注册若被服务端拒绝，核心配置已生效、对话照常。细节见「Function Calling」。
-- `voice` 与 `instructions` 都**只在建连时（第一次 `session.update`）生效**，会话中无法修改。**2026-08-31 UI 大一统（step6）起产品语义升级**：人格与音色在**孵化时一次性定格**（`/hatch`，localStorage `chat-elf:hatched`），此后不提供任何切换入口 —— 对话页设置抽屉只展示锁定说明与 记忆/历史/人格库 入口。数据层的 `switchConversationAction`（换参数=开新会话）保留，供孵化确认这一唯一调用点使用。
+- `voice` 与 `instructions` 都**只在建连时（第一次 `session.update`）生效**，会话中无法修改。**2026-08-31 UI 大一统（step6）起产品语义升级**：人格与音色在**孵化时一次性定格**（`/hatch`），此后不提供任何切换入口 —— 对话页设置抽屉只展示锁定说明与 记忆/历史/人格库 入口。**2026-09-01 用户体系 step1 起**，定格记录落库 `companions` 表（`user_id UNIQUE` 即一次性；原 localStorage `chat-elf:hatched` 标记已废弃删除），对话页人格/音色 props 均由服务端 companion 下发；抽屉底部新增退出登录入口。
 - `voice` 取值见「接入通道双轨制」的音色清单。`instructions` 由**人格模板 + 语音播报约束 + 不可覆盖的安全段**拼接（`src/lib/persona/presets.ts`）；安全段含 AI 身份披露与"不扮演心理/医疗专业人士"，人格自定义无法覆盖它 —— 合规要求必须从第一期就埋进架构，不能后补。
 - 韵律启发式（`src/lib/realtime/mood.ts`）的基频/能量阈值是按 dashscope 通道的 **Tina** 音色标定的。当前默认通道是 tokenplan（音色 `longanqian`），标定并不适用 → 非 Tina 音色一律**跳过韵律层**，表情退化为 ASR 原生 emotion + 流式文本词典两层（由 `PROSODY_CALIBRATED_VOICE` 门控，见 `use-realtime-session.ts`）。
 
@@ -196,77 +199,87 @@ TOKENPLAN_API_KEY=sk-xxx            # Token Plan 通道密钥
 DASHSCOPE_API_KEY=sk-xxx            # 百炼 API Key：dashscope 通道信令 + AI SDK 文本/向量调用共用
 DASHSCOPE_WORKSPACE_ID=xxx          # 百炼工作空间 ID，拼入信令域名
 DASHSCOPE_REGION=cn-beijing         # 区域，默认 cn-beijing
-DATABASE_URL=postgres://…           # 本地 PG / 上线 Neon（服务端专用）。缺失时降级为无记忆模式
+DATABASE_URL=postgres://…           # 本地 PG / 上线 Neon（服务端专用）。缺失时应用不可用（强制有库，见「持久化架构」）
+BETTER_AUTH_SECRET=<随机长串>        # 账号体系签名密钥（必填；openssl rand -base64 32）
+BETTER_AUTH_URL=http://localhost:3000  # 部署 Vercel 后改为线上域名
 
 # —— 可选覆盖（均有代码内默认值）——
 # DASHSCOPE_COMPATIBLE_BASE_URL=           # AI SDK 兼容端点，默认 A 写法见「Agentic 层架构」
 # DASHSCOPE_TEXT_MODEL=qwen-plus           # 记忆抽取 / 摘要用文本模型
 # DASHSCOPE_EMBEDDING_MODEL=text-embedding-v3  # 文本向量模型；换模型若改 dimensions 需同步改 memories.embedding 列宽
-
-# Supabase：持久化已改为 DATABASE_URL 直连 PostgreSQL，Supabase 降级为将来引入账号体系时
-# Auth 的候选项，与存储层解耦。NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY 已废弃移除。
 ```
 
-## 目标目录结构【2026-08-29 已实施 · 2026-08-31 UI 大一统更新】
+## 目标目录结构【2026-08-29 已实施 · 2026-09-01 用户体系更新】
 
 > 2026-08-31 UI 大一统（step6）后：拟态球界面升为**唯一 UI**（根路由），旧白底版
-> 页面与组件（chat-panel / settings-sheet / elf-avatar / 首页历史列表 / 旧 memory 页）全部删除。
-> `/mimic/*` 旧预览路由 308 重定向到下述新落点。主路径：`/`（登录）→ `/hatch`（一次性孵化）→ `/chat`。
+> 页面与组件全部删除。主路径：`/`（登录）→ `/hatch`（一次性孵化）→ `/chat`。
+> 2026-09-01 用户体系 step1 后：登录为**真实登录**（Better Auth），登录/孵化落点
+> 由服务端判定（companion 有无），人格/音色真源是数据库 `companions` 表。
 
 ```text
 src/
   app/
-    page.tsx                        # 登录页（纯 UI；已孵化→/chat，未孵化→/hatch）
-    hatch/page.tsx                  # 孵化页（egg→burst→一次性人格/音色定格，服务端壳注入自建人格）
-    chat/page.tsx                   # 对话入口（重定向到最近会话或新建表单）
-    chat/[conversationId]/page.tsx  # 对话页（Server Component，组装 memoryContext 注入 MimicChatPanel）
+    page.tsx                        # 登录页服务端壳（已登录→按 companion 跳 /chat 或 /hatch）
+    hatch/page.tsx                  # 孵化页（服务端守卫:已孵化→/chat;注入自建人格）
+    chat/page.tsx                   # 对话入口（守卫 + 未孵化→/hatch + 重定向最近会话）
+    chat/[conversationId]/page.tsx  # 对话页（Server Component:守卫 + companion 人格 props + memoryContext）
     history/page.tsx                # 历史会话（comet 球 + 列表 + 两步确认删除）
-    persona/page.tsx                # 人格库（拟态球化；只管理定义，陪伴人格锁定）
-    persona/new/page.tsx            # 新建人格（静态段优先于 [personaId]）
-    persona/[personaId]/page.tsx    # 编辑人格（预设/陪伴人格只读 + 另存副本）
+    persona/page.tsx                # 人格库（companionPersonaId 标"陪伴中"）
+    persona/new/page.tsx            # 新建人格
+    persona/[personaId]/page.tsx    # 编辑人格（companion 命中则锁定只读）
     memory/page.tsx                 # 「TA 记得你」记忆可视化页（notify 球 + 画像卡）
     language/page.tsx               # 拟态球交互语言说明页（登录页入口）
-    mimic.css                       # 拟态球设计 token 与动画（根布局全局引入，原 /mimic 专用）
+    mimic.css                       # 拟态球设计 token 与动画
     api/
+      auth/[...all]/route.ts        # Better Auth HTTP 端点（注册/登录/退出,cookie+CSRF）
       realtime/session/route.ts     # WebRTC SDP 信令转发（核心，Node runtime）
+      voice-preview/route.ts        # 音色试听 TTS 合成
   components/
     chat/
       message-feedback.tsx          # 👍/👎 埋点（对话面板复用）
     mimic/
       ball/                         # 拟态球：ball-context（常驻层）/ mimic-ball（rAF 驱动器）/ engine（bloub 移植）
-      hatch-flow.tsx                # 孵化两阶段流程（egg → 一次性定格）
-      mimic-chat-panel.tsx          # 唯一对话面板（球态映射 + 字幕 + 锁定抽屉）
+      login-form.tsx                # 登录表单（注册/登录一体,authClient + resolveLandingAction）
+      hatch-flow.tsx                # 孵化两阶段流程（确认走 completeHatchAction 服务端定格）
+      mimic-chat-panel.tsx          # 唯一对话面板（人格来自服务端 companion props + 设置抽屉含退出登录）
       mimic-history-list.tsx        # 历史列表（orbit 转场 + 删除）
       mimic-memory-list.tsx         # 记忆列表（wink/sleep 交互 + 物理删除）
       mimic-new-conversation-form.tsx
-    persona/                        # 人格编辑器、人格列表、页面 header（拟态球化）
+    persona/                        # 人格编辑器、人格列表、页面 header
   lib/
     ai/provider.ts                  # AI SDK provider（DashScope OpenAI 兼容模式）
+    auth/
+      auth.ts                       # betterAuth 实例（drizzle adapter,邮箱+密码;纯服务端）
+      session.ts                    # 会话读取与守卫（requirePageUserId / requireActionUserId）
+      actions.ts                    # resolveLandingAction（首次播种 + /hatch|/chat 落点）
+      client.ts                     # authClient（浏览器端,仅 "use client" 组件导入）
+    companion/
+      repository.ts                 # companions 表读写（getCompanion / createCompanion 一次性）
+      actions.ts                    # completeHatchAction（定格 + 开新会话）
     db/
       client.ts                     # pg 连接池 + drizzle 实例（globalThis 单例）
       schema.ts                     # 查询侧 schema（镜像 db/migrations，不参与 DDL）
     dashscope/config.ts             # 模型名、端点拼装、区域配置
     tokenplan/config.ts             # Token Plan 通道配置
     memory/
-      actions.ts                    # Server Actions：会话 / 转写 / 抽取 / 画像 / 记忆删除 / 反馈
-      conversations.ts              # 会话与消息 CRUD（入参过 UUID 校验）
+      actions.ts                    # Server Actions：会话 / 转写 / 抽取 / 画像 / 记忆删除 / 反馈（全部鉴权）
+      conversations.ts              # 会话与消息 CRUD（入参 userId + UUID 校验 + 归属过滤）
       context-builder.ts            # 画像 + 语义记忆检索（含遗忘衰减）+ 最近历史组装
       tasks.ts                      # 记忆抽取（generateObject + zod）+ 相似度判重 + upsert
       profile.ts                    # 画像整合（LLM 整体重写）+ 会话计数触发
       store.ts                      # 记忆的列表 / 物理删除（管理页用）
-      feedback.ts                   # 👍/👎 埋点读写（幂等：同分撤销、异分改判）
+      feedback.ts                   # 👍/👎 埋点读写（message→conversation→user 归属链校验）
       embedding.ts                  # text-embedding-v3 向量化（失败返回 null，不阻塞链路）
     persona/
-      presets.ts                    # 人格预设 + 播报约束 + 不可覆盖安全段
+      presets.ts                    # 人格预设 + 播报约束 + 不可覆盖安全段（预设唯一数据源）
       voices.ts                     # 系统音色清单 + 韵律标定音色常量
       traits.ts                     # 人格矩阵维度定义 + zod schema + 解析
-      render.ts                     # 人格 → instructions 渲染器（编辑器/孵化预览同源）
-      repository.ts                 # personas 表读写（服务端）
-      types.ts                      # 类型与纯常量（**不得 import 服务端模块**，见下）
-      resolve.ts                    # localStorage 里的 personaId → 可渲染人格（纯函数）
-      settings.ts                   # localStorage 持久化（前缀 chat-elf:）
+      render.ts                     # 人格 → instructions 渲染器
+      repository.ts                 # personas 表读写 + seedPresetsForUser（注册时播种）
+      types.ts                      # 类型与纯常量（**不得 import 服务端模块**）
+      resolve.ts                    # personaId → 可渲染人格（纯函数,三段回落链）
+      settings.ts                   # localStorage 持久化（客户端展示缓存,人格真源已移交 companion）
       use-settings.ts               # useSyncExternalStore 订阅
-      hatch-state.ts                # 一次性孵化标记（chat-elf:hatched；账号体系后归 user 层）
     realtime/
       use-realtime-session.ts       # 封装 RTCPeerConnection + DataChannel 状态机
       events.ts                     # Realtime 事件的 discriminated union 类型
@@ -285,34 +298,41 @@ db/migrations/                      # 建表 SQL（手写、幂等，迁移的�
   - `messages(id, conversation_id → conversations.id ON DELETE CASCADE, role ∈ {user,assistant,system}, content, created_at)`
   - `memories(id, user_id, content, category ∈ {fact,preference,event,relationship,emotion}, importance real, emotion_score real, embedding vector(1024), source_conversation_id → conversations.id ON DELETE SET NULL, last_confirmed_at, last_accessed_at, archived bool, created_at)`
     - `embedding` 上有 HNSW 余弦索引（`vector_cosine_ops`）用于语义检索；`archived = true` 的记忆不进检索结果但不物理删除。
-- `0002_personas.sql`（2026-08-30，step2）
+- `0002_personas.sql`（2026-08-30 step2；2026-09-01 用户体系修订：**种子 INSERT 段已移除**，预设改为注册时由 `seedPresetsForUser()` 从 `presets.ts` TS 常量播种 —— SQL/TS 双源同步问题就此消灭）
   - `personas(id uuid pk, user_id, name, emoji, tagline, archetype, traits jsonb, voice, backstory, boundaries, is_preset bool, created_at, updated_at)`
-    - `archetype` 是模板来源 id（如 `xiaoyou`），用户自建为 `NULL`；`(user_id, archetype)` 上有 partial unique index，使种子可幂等重复插入。
-    - `traits` 存 jsonb 而非 6 个固定列：人格维度会随产品演进增减，拆列则每加一维都要改表。解析交给 `parseTraits()`，非法值回落中性。
-    - ⚠️ **预设的 traits / backstory 在 SQL 种子与 `src/lib/persona/presets.ts` 里各存一份** —— 后者是"未配置 DATABASE_URL 时的降级数据源"，两处不一致会导致有库/无库两种环境下人格表现不同。改任一侧必须同步另一侧。
-  - `conversations.persona_id uuid → personas.id ON DELETE SET NULL`。**原有的 `persona` / `voice` 文本列保留**，它们是会话发生时的展示快照（人格被删后历史列表仍能显示"当时聊的是谁"）。
+    - `archetype` 是模板来源 id（如 `xiaoyou`），用户自建为 `NULL`；`(user_id, archetype)` 上有 partial unique index（播种幂等）。
+    - `traits` 存 jsonb：人格维度会随产品演进增减，拆列则每加一维都要改表。解析交给 `parseTraits()`，非法值回落中性。
+  - `conversations.persona_id uuid → personas.id ON DELETE SET NULL`。**原有的 `persona` / `voice` 文本列保留**，它们是会话发生时的展示快照。
 - `0003_feedback.sql`（2026-08-30，step2）
-  - `feedback(id, message_id → messages.id ON DELETE CASCADE, score smallint ∈ {-1,1}, created_at)`，`message_id` 唯一：同分即撤销、异分即改判。只埋点不分析。
+  - `feedback(id, message_id → messages.id ON DELETE CASCADE, score smallint ∈ {-1,1}, created_at)`，`message_id` 唯一。
 - `0004_user_profile.sql`（2026-08-30，step3）
-  - `user_profile(user_id pk, summary text, traits jsonb, pending_conversations int, updated_at, refreshed_at)` —— 画像层，见「Agentic 层架构」的双层分工。
+  - `user_profile(user_id pk, summary text, traits jsonb, pending_conversations int, updated_at, refreshed_at)`。
 - `0005_memory_source.sql`（2026-08-30，step3）
-  - `memories.source text ∈ {batch, realtime}`（带 CHECK 约束），区分两条写入轨。
+  - `memories.source text ∈ {batch, realtime}`（带 CHECK 约束）。
+- `0006_auth.sql`（2026-09-01，用户体系 step1）
+  - Better Auth 核心四表：`"user"`(email 唯一) / `"session"`(token 唯一, user_id CASCADE) / `account`(credential 登录: provider_id='credential', issuer='local:credential', account_id=user.id, password=scrypt 哈希；`(issuer, account_id)` 复合唯一) / `verification`。列结构以 CLI generate 产出为参考、**运行时行为为准**（CLI 的 account 表滞后缺 issuer 列，勿照抄）。
+  - 顺带：业务表 `user_id` 去 `local-user` 默认值；**清理单用户阶段 `local-user` 全部旧数据**（决策：不迁移）。
+- `0007_companions.sql`（2026-09-01，用户体系 step1）
+  - `companions(id uuid pk, user_id text UNIQUE → "user".id CASCADE, persona_id uuid → personas.id SET NULL, persona_name text, voice text, hatched_at)` —— 用户 1:1 陪伴精灵，`UNIQUE` 是"一次性孵化"的数据库级保证；`persona_name`/`voice` 是定格快照。
+- `0008_invite_codes.sql`（2026-09-01，内测准入）
+  - `invite_codes(code text pk, note, active bool, created_at)`，迁移内预置内测主码。**注册邀请码在 auth 实例的 `hooks.before` 里强制校验**（只拦 `/sign-up/email`，比对 active 的码，不一致 throw `INVITE_CODE_INVALID`）—— 校验必须在服务端链路，`/api/auth` 是公开端点，只在前端拦会被直接调 API 绕过；登录不校验。停用码：`UPDATE invite_codes SET active=false`。
 
-- 需启用 `vector` 扩展（本机 Homebrew PG 17.5 自带 0.8.0，见「持久化架构」的事实更正）。
+- 需启用 `vector` 扩展（本机 Homebrew PG 17.5 自带 0.8.0）。
 
 realtime 会话是易失的，文本转写在每轮响应定稿后异步入库，这是历史留存与跨设备恢复的唯一可靠途径。
 
 ## 编码约定【已确认】
 
 - 页面默认 Server Component；凡涉及麦克风、AudioContext、RTCPeerConnection 的代码必须处于 `'use client'` 组件内。
-- Route Handler 默认 Node.js runtime；本项目的信令转发不需要 Edge。
+- Route Handler 默认 Node.js runtime；本项目不需要 Edge。
 - AI SDK 调用只允许出现在服务端代码路径（Route Handlers / Server Actions）；客户端与模型的唯一通道是 realtime hook。
 - 所有对外部世界的类型（Realtime 事件、数据库表结构、AI SDK 结构化输出）要有显式 TS 类型，事件用 discriminated union，schema 用 zod。
 - 密钥与密钥派生值绝不出现在前端可访问代码路径；新增环境变量必须同步 `.env.example`。
 - **禁止在 effect 体内同步调用 `setState`**（`react-hooks/set-state-in-effect`，React Compiler 规则）。需要"外部数据源 → 组件"时用 `useSyncExternalStore`；需要"props 变化时重置局部状态"时用渲染期校正（`if (prop !== prev) setState(prop)`），不要塞进 `useEffect`。在 effect 里改 ref、发请求都是允许的。
-- **客户端传入的 id 是不可信输入**：Server Action 收到会话 id 一律先过 UUID 校验再拼查询（`isValidConversationId`）。
-- **客户端组件只能从"纯模块"导入值**：`import type` 会被编译期擦除、跨边界安全；**值导入则会把整条依赖链拖进客户端 bundle**。踩过的实况（2026-08-30）：人格编辑器从 `persona/repository.ts` 导入两个长度常量，而 repository 依赖 `db/client` → `pg`，构建直接报 `Module not found: Can't resolve 'util/types'`。修法是把类型与纯常量拆到 `persona/types.ts`，该文件的**唯一约束是不得 import 任何服务端模块**；需要共享值常量时先问它属于哪一侧。
-- **增强能力失败必须降级而非抛错**：向量化、记忆检索、转写落库失败时记录日志并返回空结果/ false，绝不能把异常冒泡到语音链路或页面渲染。
+- **客户端传入的 id 是不可信输入**：Server Action 收到会话 id 一律先过 UUID 校验再拼查询（`isValidConversationId`）；多用户起还必须**验归属**——非本人的会话/记忆/人格一律当作不存在（查询带 `WHERE user_id`，详见各 repository）。
+- **Server Action 必须先鉴权**（2026-09-01 用户体系 step1 起）：每个 action 首行 `requireActionUserId()`（或页面 `requirePageUserId()`），未登录按各自失败形态静默返回，绝不写库。
+- **客户端组件只能从"纯模块"导入值**：`import type` 会被编译期擦除、跨边界安全；**值导入则会把整条依赖链拖进客户端 bundle**（如 `auth.ts` / `db/client`）。需要共享值常量时先问它属于哪一侧（浏览器侧的例子：`authClient` 在 `lib/auth/client.ts`，与服务端实例隔离）。
+- **增强能力失败必须降级而非抛错**：向量化、记忆检索、转写落库失败时记录日志并返回空结果/ false，绝不能把异常冒泡到语音链路或页面渲染。（注意与"页面层强制有库"的分工：`DATABASE_URL` 缺失是配置错误，页面层 fail fast；运行时故障才是这里的降级场景。）
 - 提交前运行 `pnpm lint` 与 `pnpm build`。
 
 ## 模型已知约束【已确认，编码时须处理】

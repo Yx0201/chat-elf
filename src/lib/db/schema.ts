@@ -1,5 +1,7 @@
 /**
- * Drizzle 查询侧 schema —— 与 `db/migrations/0001_init.sql` **一一对应**。
+ * Drizzle 查询侧 schema —— 与 `db/migrations/*.sql` **一一对应**
+ * (0001 会话/转写/记忆、0002 人格、0003 反馈、0004 画像、0005 记忆来源、
+ *  0006 Better Auth 四表、0007 陪伴精灵)。
  *
  * 职责边界(重要):本项目迁移的真相源是**手写 SQL 文件**,不是这份 TS schema。
  * 因此这里只用 drizzle-orm 做查询侧的类型安全,不接管建表 —— 不引入 drizzle-kit,
@@ -27,13 +29,80 @@ import { vector } from "drizzle-orm/pg-core";
 /**
  * 向量维度 1024 —— 百炼 text-embedding-v3 / v4 / qwen3.7-text-embedding 的
  * **默认**维度(官方文档:dimensions 可选 …1024、768、512…,默认 1024)。
- * 取默认值是为了将来换 embedding 模型时不必改表。
+ * 取默认是为了将来换 embedding 模型时不必改表。
  * https://help.aliyun.com/zh/model-studio/text-embedding-synchronous-api
  */
 export const EMBEDDING_DIMENSIONS = 1024;
 
-/** 单用户阶段的 user_id 占位(ARCHITECTURE.md「持久化架构」)。 */
-export const LOCAL_USER_ID = "local-user";
+/* ------------------------------------------------------------------ */
+/* Better Auth 核心四表(0006_auth.sql;列结构以 @better-auth/cli        */
+/* generate 的产出为参考翻译,查询侧镜像同此)                            */
+/* ------------------------------------------------------------------ */
+
+export const user = pgTable("user", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  email: text("email").notNull().unique(),
+  emailVerified: boolean("email_verified").notNull().default(false),
+  image: text("image"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const session = pgTable("session", {
+  id: text("id").primaryKey(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  token: text("token").notNull().unique(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+});
+
+export const account = pgTable(
+  "account",
+  {
+    id: text("id").primaryKey(),
+    /** 提供方侧的主体 id;credential 登录时为邮箱 */
+    accountId: text("account_id").notNull(),
+    /** 提供方 id;credential 登录时为 'credential' */
+    providerId: text("provider_id").notNull(),
+    /** 身份命名空间;credential 策略下为 'local:credential' */
+    issuer: text("issuer"),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    accessToken: text("access_token"),
+    refreshToken: text("refresh_token"),
+    idToken: text("id_token"),
+    accessTokenExpiresAt: timestamp("access_token_expires_at", { withTimezone: true }),
+    refreshTokenExpiresAt: timestamp("refresh_token_expires_at", { withTimezone: true }),
+    scope: text("scope"),
+    /** credential 登录时的密码哈希(scrypt) */
+    password: text("password"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("account_issuer_account_id_idx").on(table.issuer, table.accountId)],
+);
+
+export const verification = pgTable("verification", {
+  id: text("id").primaryKey(),
+  identifier: text("identifier").notNull(),
+  type: text("type").notNull(),
+  value: text("value").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type UserRow = typeof user.$inferSelect;
+export type SessionRow = typeof session.$inferSelect;
+export type AccountRow = typeof account.$inferSelect;
+export type VerificationRow = typeof verification.$inferSelect;
 
 /**
  * 人格(step2 T1)。
@@ -46,7 +115,7 @@ export const personas = pgTable(
   "personas",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    userId: text("user_id").notNull().default(LOCAL_USER_ID),
+    userId: text("user_id").notNull(),
     name: text("name").notNull(),
     emoji: text("emoji").notNull().default(""),
     tagline: text("tagline").notNull().default(""),
@@ -71,7 +140,7 @@ export const conversations = pgTable(
   "conversations",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    userId: text("user_id").notNull().default(LOCAL_USER_ID),
+    userId: text("user_id").notNull(),
     title: text("title").notNull().default(""),
     /**
      * 人格外键(step2)。可空:人格被删除后由数据库置 NULL,会话本身保留。
@@ -110,7 +179,7 @@ export const memories = pgTable(
   "memories",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    userId: text("user_id").notNull().default(LOCAL_USER_ID),
+    userId: text("user_id").notNull(),
     content: text("content").notNull(),
     /** fact | preference | event | relationship | emotion(取值由 SQL 的 CHECK 约束强制) */
     category: text("category").notNull().default("fact"),
@@ -169,6 +238,46 @@ export const userProfile = pgTable("user_profile", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   refreshedAt: timestamp("refreshed_at", { withTimezone: true }),
 });
+
+/**
+ * 陪伴精灵(0007_companions.sql,用户体系 step1 T4)。
+ *
+ * 用户 1:1:userId UNIQUE 是"一次性孵化"的数据库级保证。
+ * personaName / voice 是定格时的快照 —— 人格被删(personaId 置 NULL)后
+ * 精灵名与音色仍可展示,对齐 conversations.persona 的快照先例。
+ */
+export const companions = pgTable(
+  "companions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: text("user_id")
+      .notNull()
+      .unique()
+      .references(() => user.id, { onDelete: "cascade" }),
+    personaId: uuid("persona_id").references(() => personas.id, { onDelete: "set null" }),
+    personaName: text("persona_name"),
+    voice: text("voice").notNull(),
+    hatchedAt: timestamp("hatched_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("companions_persona_idx").on(table.personaId)],
+);
+
+export type CompanionRow = typeof companions.$inferSelect;
+
+/**
+ * 注册邀请码(0008_invite_codes.sql,内测准入)。
+ *
+ * 定位是准入门槛而非安全机制:明文比对。注册时服务端 hook 校验
+ * (见 lib/auth/auth.ts),只挡 /sign-up/email,不挡登录。
+ */
+export const inviteCodes = pgTable("invite_codes", {
+  code: text("code").primaryKey(),
+  note: text("note").notNull().default(""),
+  active: boolean("active").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type InviteCodeRow = typeof inviteCodes.$inferSelect;
 
 export type ConversationRow = typeof conversations.$inferSelect;
 export type MessageRow = typeof messages.$inferSelect;

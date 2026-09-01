@@ -14,7 +14,7 @@
  *
  * **保存语义(2026-08-31 起)**:保存只写人格定义,不再"开启新会话" ——
  * 陪伴人格已在孵化时定格(见 /hatch),人格库仅管理定义。
- * **锁定**:当前陪伴中的人格(id 命中 settings.personaId)只读,
+ * **锁定**:当前陪伴中的人格(id 命中 companionPersonaId)只读,
  * 不可编辑、不可删除;想调整先另存副本。
  */
 
@@ -33,13 +33,14 @@ import {
   type PersonaDraft,
   type PersonaRecord,
 } from "@/lib/persona/types";
-import { usePersonaSettings } from "@/lib/persona/use-settings";
-import { REALTIME_VOICES } from "@/lib/persona/voices";
+import { DEFAULT_VOICE, REALTIME_VOICES } from "@/lib/persona/voices";
 import { TRAIT_DEFINITIONS, type TraitKey } from "@/lib/persona/traits";
 
 export interface PersonaEditorProps {
   /** 已有记录的 id;新建时为 null */
   personaId: string | null;
+  /** 孵化定格的人格 id(服务端 companion);命中则锁定只读 */
+  companionPersonaId: string | null;
   /** 已有记录;新建时为 null */
   initial: PersonaRecord | null;
   /** 预设人格与"无数据库"降级态:只读,只能另存副本 */
@@ -73,21 +74,21 @@ function toDraft(record: PersonaRecord | null, fallbackVoice: string): PersonaDr
 
 export function PersonaEditor({
   personaId,
+  companionPersonaId,
   initial,
   readOnly,
   canDelete,
 }: PersonaEditorProps) {
-  const { settings } = usePersonaSettings();
   const router = useRouter();
 
-  const [draft, setDraft] = useState<PersonaDraft>(() => toDraft(initial, settings.voice));
+  const [draft, setDraft] = useState<PersonaDraft>(() => toDraft(initial, DEFAULT_VOICE));
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   // 陪伴中的人格 = 孵化时定格的那个,只读不删(一次性语义,H5 与桌面一致)
-  const activeCompanion = initial !== null && initial.id === settings.personaId;
+  const activeCompanion = initial !== null && initial.id === companionPersonaId;
   const effectiveReadOnly = readOnly || activeCompanion;
   const effectiveCanDelete = canDelete && !activeCompanion;
 

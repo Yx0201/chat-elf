@@ -3,21 +3,16 @@
 /**
  * 「开一场对话」表单(空库首屏用)。
  *
- * 客户端组件:人格/音色在 localStorage,Server Component 读不到,
- * 读出后随隐藏字段提交给 startConversationAction(落点统一为 /chat/<id>)。
+ * 人格/音色快照由 startConversationAction 服务端自取 companion(用户体系
+ * step1),表单本身不再携带任何人格参数。
  */
 
 import { startConversationAction } from "@/lib/memory/actions";
-import { usePersonaSettings } from "@/lib/persona/use-settings";
 import { BallAnchor } from "@/components/mimic/ball/ball-context";
 
 export function MimicNewConversationForm() {
-  const { settings } = usePersonaSettings();
-
   return (
     <form action={startConversationAction} className="mimic-page flex min-h-dvh flex-col items-center justify-center gap-6 bg-[#FAFAF9] px-6">
-      <input type="hidden" name="persona" value={settings.personaId} />
-      <input type="hidden" name="voice" value={settings.voice ?? ""} />
       <BallAnchor state="idle" className="h-[200px] w-[200px] lg:h-[240px] lg:w-[240px]" />
       <div className="flex flex-col items-center gap-2 text-center">
         <h1 className="text-xl font-semibold text-[#1A1A1A] lg:text-2xl">还没有说过话</h1>

@@ -9,9 +9,9 @@
  *   - 打不同的分 = 改判(upsert)。
  */
 
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { getDb } from "@/lib/db/client";
-import { feedback } from "@/lib/db/schema";
+import { conversations, feedback, messages } from "@/lib/db/schema";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -21,6 +21,17 @@ export type FeedbackScore = 1 | -1;
 /** 客户端传来的 message id 是不可信输入,先校验形状。 */
 export function isValidMessageId(id: string): boolean {
   return UUID_RE.test(id);
+}
+
+/** 该消息是否属于当前用户(message → conversation → user 的归属链)。 */
+async function messageBelongsTo(userId: string, messageId: string): Promise<boolean> {
+  const [row] = await getDb()
+    .select({ id: messages.id })
+    .from(messages)
+    .innerJoin(conversations, eq(messages.conversationId, conversations.id))
+    .where(and(eq(messages.id, messageId), eq(conversations.userId, userId)))
+    .limit(1);
+  return row !== undefined;
 }
 
 function toScore(value: number | null): FeedbackScore | null {
@@ -38,17 +49,20 @@ export async function getFeedbackScore(messageId: string): Promise<FeedbackScore
 }
 
 /**
- * 给一条消息打分,返回**生效后**的分数(null = 已撤销)。
+ * 给一条消息打分,返回**生效后**的分数(null = 已撤销,也含不属于当前用户)。
  *
  * 先读后写而不是直接 upsert:需要知道"这次点击是不是撤销"。
  * 同一条消息的反馈量极低(一个人一次点击),多一次查询没有压力。
  */
 export async function rateMessage(
+  userId: string,
   messageId: string,
   score: FeedbackScore,
 ): Promise<FeedbackScore | null> {
   if (!isValidMessageId(messageId)) return null;
   const db = getDb();
+  if (!(await messageBelongsTo(userId, messageId))) return null;
+
   const [existing] = await db
     .select({ score: feedback.score })
     .from(feedback)

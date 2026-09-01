@@ -10,6 +10,8 @@
 
 import Link from "next/link";
 import { PersonaList } from "@/components/persona/persona-list";
+import { requirePageUserId } from "@/lib/auth/session";
+import { getCompanion } from "@/lib/companion/repository";
 import { isDatabaseConfigured } from "@/lib/db/client";
 import { listPersonas } from "@/lib/persona/repository";
 import { PersonaPageHeader } from "@/components/persona/persona-page-header";
@@ -18,8 +20,10 @@ import { PersonaPageHeader } from "@/components/persona/persona-page-header";
 export const dynamic = "force-dynamic";
 
 export default async function PersonaPage() {
+  const userId = await requirePageUserId();
   const persistence = isDatabaseConfigured();
-  const all = await listPersonas();
+  const companion = await getCompanion(userId);
+  const all = await listPersonas(userId);
   const presets = all.filter((persona) => persona.isPreset);
   const customs = all.filter((persona) => !persona.isPreset);
 
@@ -50,7 +54,7 @@ export default async function PersonaPage() {
         ) : null}
 
         <div className="mt-8 pb-8">
-          <PersonaList presets={presets} customs={customs} />
+          <PersonaList presets={presets} customs={customs} companionPersonaId={companion?.personaId ?? null} />
         </div>
       </div>
     </div>

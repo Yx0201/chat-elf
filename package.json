@@ -12,6 +12,7 @@
     "@ai-sdk/openai-compatible": "^3.0.40",
     "@base-ui/react": "^1.7.0",
     "ai": "^7.0.84",
+    "better-auth": "^1.7.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "drizzle-orm": "^0.45.2",
