@@ -49,24 +49,33 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
-  let upstream: Response;
-  try {
-    upstream = await fetch(config.signalingUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/sdp",
-        Authorization: `Bearer ${config.apiKey}`,
-      },
-      body: offerSdp,
-      cache: "no-store",
-    });
-  } catch (error) {
-    // 连接层失败必须落日志并透出原因(DNS/TLS/超时各异),否则线上只见 502 无法归因。
-    console.error("[realtime/session] 信令连接失败:", error);
+  // sin1 函数 → 北京信令端点的跨境连接偶发失败(2026-09-02 实测间歇性)。
+  // 仅网络层失败(fetch 抛错)才重试:此时请求未到达上游、未创建会话,重发安全;
+  // 上游返回了 HTTP 响应(含 4xx/5xx)说明连接正常,不重试。
+  const MAX_ATTEMPTS = 2;
+  let upstream: Response | undefined;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS && upstream === undefined; attempt++) {
+    try {
+      upstream = await fetch(config.signalingUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/sdp",
+          Authorization: `Bearer ${config.apiKey}`,
+        },
+        body: offerSdp,
+        cache: "no-store",
+      });
+    } catch (error) {
+      lastError = error;
+      console.error(`[realtime/session] 信令连接失败(尝试 ${attempt}/${MAX_ATTEMPTS}):`, error);
+    }
+  }
+  if (upstream === undefined) {
     const reason =
-      error instanceof Error && error.cause instanceof Error
-        ? `${error.name}: ${error.message}; cause=${error.cause.name}: ${error.cause.message}`
-        : String(error);
+      lastError instanceof Error && lastError.cause instanceof Error
+        ? `${lastError.name}: ${lastError.message}; cause=${lastError.cause.name}: ${lastError.cause.message}`
+        : String(lastError);
     return Response.json(
       { error: `连接 ${config.provider} 信令端点失败`, reason },
       { status: 502 },
