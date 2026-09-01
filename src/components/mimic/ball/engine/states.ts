@@ -69,9 +69,10 @@ export interface Pose {
   dotsBehind: boolean;
 }
 
-const pair = (w: number, h: number): [EyeCfg, EyeCfg] => [
-  { w, h, open: 1 },
-  { w, h, open: 1 },
+/** 双眼同尺寸；`tilt` 镜像施加，`open` 传眨眼式半闭(如困倦 0.42)。 */
+const pair = (w: number, h: number, tilt = 0, open = 1): [EyeCfg, EyeCfg] => [
+  { w, h, tilt, open },
+  { w, h, tilt: -tilt, open },
 ];
 
 function base(over: Partial<Pose> = {}): Pose {
@@ -162,7 +163,11 @@ export type StateId =
   | "burst"
   | "comet"
   /** 界面转场，不在目录动画之列 */
-  | "swirl";
+  | "swirl"
+  /** 说话表情轮换(bloub timide/méfiant/neutre),不在目录动画之列 */
+  | "shy"
+  | "doubt"
+  | "calm";
 
 export interface StateDef {
   id: StateId;
@@ -261,9 +266,66 @@ export const STATES: StateDef[] = [
     baseBody: true,
     pose: () =>
       base({
-        gaze: { yaw: 6.92, pitch: -21.96, roll: 11.6 },
-        split: 18.43,
-        eyes: pair(0.356, 0.875),
+        // 2026-09-01 用户拍板:聆听 = 好奇表情(bloub expressions.ts curieux 原值)。
+        // 头的 roll 承担「好奇」,双眼同向 -8° 倾斜、一大一小;
+        // 原 wide 睁大眼参数(gaze 6.92/-21.96/11.6 · split 18.43 · 0.356×0.875)作废。
+        gaze: { yaw: 16, pitch: -9, roll: -15 },
+        split: 16.5,
+        eyes: [
+          { w: 0.24, h: 0.46, tilt: -8, open: 1 },
+          { w: 0.2, h: 0.38, tilt: -8, open: 1 },
+        ],
+      }),
+  },
+
+  {
+    // 羞怯(bloub timide 原值):目光垂向左下,小窄眼 —— 说话轮换表情之一
+    id: "shy",
+    duration: 2,
+    morph: 0.35,
+    blinkIn: true,
+    baseFace: false,
+    baseBody: true,
+    pose: () =>
+      base({
+        gaze: { yaw: -19, pitch: -14, roll: -7 },
+        split: 14,
+        eyes: pair(0.17, 0.3),
+      }),
+  },
+
+  {
+    // 怀疑(bloub méfiant 原值):一眼正常、一眼眯成缝 —— 说话轮换表情之二
+    id: "doubt",
+    duration: 2,
+    morph: 0.35,
+    blinkIn: true,
+    baseFace: false,
+    baseBody: true,
+    pose: () =>
+      base({
+        gaze: { yaw: 12, pitch: 6, roll: -6 },
+        split: 16,
+        eyes: [
+          { w: 0.21, h: 0.4, open: 1 },
+          { w: 0.22, h: 0.15, open: 1 },
+        ],
+      }),
+  },
+
+  {
+    // 平静(bloub neutre 的眼;视线烘为 chat 正视)—— 说话轮换表情之三
+    id: "calm",
+    duration: 2,
+    morph: 0.35,
+    blinkIn: true,
+    baseFace: false,
+    baseBody: true,
+    pose: () =>
+      base({
+        gaze: { yaw: 0, pitch: 0, roll: 0 },
+        split: EYE_SPLIT,
+        eyes: pair(EYE_W, EYE_H),
       }),
   },
 
@@ -347,17 +409,20 @@ export const STATES: StateDef[] = [
   },
 
   {
+    // 困倦(2026-09-01 拍板:bloub somnolent 表情原值)——完整圆球 +
+    // 半耷拉的眼皮(open 0.42,与眨眼同一压扁机制),头微偏。
+    // 旧的「小点上下弹跳」是删除记忆反馈的语义,与此处"打瞌睡"不符,已弃。
     id: "sleep",
     duration: 2.4,
     morph: 0.5,
     baseFace: false,
-    baseBody: false,
-    blinkIn: false,
-    pose: (t) =>
+    baseBody: true,
+    blinkIn: true,
+    pose: () =>
       base({
-        // 实测竖向弹跳：+0.11 为心 ±0.19，周期 0.6 s
-        sil: circle(0.1585, { cy: 0.11 + Math.sin(t * (TAU / 0.6)) * 0.19 }),
-        eyeAlpha: 0,
+        gaze: { yaw: 6, pitch: -9, roll: -3 },
+        split: 16,
+        eyes: pair(0.2, 0.42, 0, 0.42),
       }),
   },
 

@@ -4,8 +4,8 @@
  * 孵化流程(2026-08-31 UI 大一统新增)— /hatch 的客户端主体。
  *
  * 两个阶段:
- *   1. egg —— 深色舞台 + 蛋形球。点「唤醒它」(2026-08-31 二次改版):
- *      蛋直接播彗星动画(塌缩成点 + 拖尾),球随后飞到页面左上角,
+ *   1. egg —— 深色舞台 + 困倦(sleep)的拟态球(2026-09-01 拍板:不再用蛋形)。
+ *      点「唤醒它」:球播彗星动画(塌缩成点 + 拖尾),随后飞到页面左上角,
  *      进入 persona;
  *   2. persona —— 一次性性格设置:球定居**左上角**(hexagon 态),
  *      下方是预设/自建人格 chips + 五维滑块 + 音色 + 预览卡。
@@ -287,10 +287,10 @@ export function HatchFlow({
   if (stage === "egg") {
     return (
       <div className="mimic-page flex min-h-dvh flex-col items-center justify-center gap-6 bg-[#0A1530] px-6 py-12">
-        <BallAnchor state="egg" variant="light" className="h-40 w-40 lg:h-[260px] lg:w-[260px]" />
+        <BallAnchor state="sleep" variant="light" className="h-40 w-40 lg:h-[260px] lg:w-[260px]" />
         <h1 className="text-center text-3xl font-semibold text-white lg:text-[40px]">把它孵出来</h1>
         <p className="max-w-[420px] text-center text-sm leading-[1.55] text-[#A4A097]">
-          它还没出生,目光会跟着你的光标。唤醒后,再为它定一次格 —— 性格与音色,一生只选一次。
+          它还困着,眯着眼打瞌睡。唤醒后,再为它定一次格 —— 性格与音色,一生只选一次。
         </p>
         <button
           type="button"

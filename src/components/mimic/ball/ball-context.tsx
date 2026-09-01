@@ -23,7 +23,7 @@ import {
 } from "react";
 import type { ReactNode } from "react";
 import { MimicBall } from "./mimic-ball";
-import type { BallApi, BallState, BallVariant } from "./types";
+import type { BallApi, BallState, BallVariant, RestGaze } from "./types";
 
 export interface BallAnchorData {
   x: number;
@@ -31,6 +31,8 @@ export interface BallAnchorData {
   size: number;
   variant: BallVariant;
   state: BallState;
+  /** 页面级休眠视线(见 types.ts):不传保持引擎默认的 bloub 右上侧脸 */
+  restGaze?: RestGaze;
 }
 
 export interface BallCtl {
@@ -42,7 +44,7 @@ export interface BallCtl {
   setBallState(state: BallState): void;
   /** 临时态（wink/sleep/alert 等一闪而过，ms 后回落） */
   flash(state: BallState, ms: number): void;
-  /** 触发点击彩虹 */
+  /** 触发彩虹爆散(陪伴/字幕切换等编排用;点击球的默认反应已改为千鸟纹波) */
   triggerBurst(): void;
   /** 旋转一圈（保存人格 / 换预设的转场） */
   swirl(): void;
@@ -193,6 +195,7 @@ export function BallProvider({ children }: { children: ReactNode }) {
             state={displayState}
             variant={variant}
             gazeOverride={gazeDir}
+            restGaze={anchor?.restGaze ?? null}
             onReady={handleReady}
           />
         </div>
@@ -213,11 +216,13 @@ export interface BallAnchorProps {
   /** 进入页面时的初始球态 */
   state: BallState;
   variant?: BallVariant;
+  /** 页面级休眠视线(如 chat 页传 {yaw:0,pitch:10} 正视);不传用引擎默认 */
+  restGaze?: RestGaze;
   /** 尺寸由 className 控制（如 w-40 h-40 lg:w-56 lg:h-56），实测取宽 */
   className?: string;
 }
 
-export function BallAnchor({ state, variant = "ink", className }: BallAnchorProps) {
+export function BallAnchor({ state, variant = "ink", restGaze, className }: BallAnchorProps) {
   const ctl = useBall();
   const ref = useRef<HTMLDivElement | null>(null);
 
@@ -240,7 +245,14 @@ export function BallAnchor({ state, variant = "ink", className }: BallAnchorProp
         raf = 0;
         const r = el.getBoundingClientRect();
         if (r.width === 0) return;
-        ctl.registerAnchor({ x: r.left, y: r.top, size: r.width, variant, state });
+        ctl.registerAnchor({
+          x: r.left,
+          y: r.top,
+          size: r.width,
+          variant,
+          state,
+          ...(restGaze === undefined ? {} : { restGaze }),
+        });
       });
     };
 
@@ -255,7 +267,7 @@ export function BallAnchor({ state, variant = "ink", className }: BallAnchorProp
       window.removeEventListener("resize", measure);
       window.removeEventListener("scroll", measure);
     };
-  }, [ctl, state, variant]);
+  }, [ctl, state, variant, restGaze]);
 
   return <div ref={ref} aria-hidden className={className} />;
 }

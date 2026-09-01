@@ -26,7 +26,7 @@ import { BotEngine, type BotFrame } from "./engine/engine";
 import { NOTIF_BLUE, type DotRender, mixHex } from "./engine/decor";
 import { STATE_BY_ID } from "./engine/states";
 import { clamp, easings } from "./engine/math";
-import type { BallApi, BallState, BallVariant } from "./types";
+import type { BallApi, BallState, BallVariant, RestGaze } from "./types";
 
 /* ---------- 常量 ---------- */
 
@@ -66,6 +66,9 @@ const STATE_LABEL: Record<BallState, string> = {
   hexagon: "性格",
   comet: "历史",
   alert: "出错了",
+  shy: "羞怯",
+  doubt: "怀疑",
+  calm: "平静",
 };
 
 /** 装饰槽位上限：最坏的交叉淡入（orbit 6 环 + comet 4 缎带）需要 10。 */
@@ -80,6 +83,12 @@ export interface MimicBallProps {
   className?: string;
   /** gaze 方向覆盖（-1..1，用于滑块联动）；null 时回退鼠标跟随 */
   gazeOverride?: { x: number; y: number } | null;
+  /**
+   * 页面级休眠视线（度）。提供时覆盖引擎默认 REST_GAZE（bloub 右上侧脸）——
+   * 如 chat 页传 {yaw:0, pitch:0, roll:0} 用彻底正视。同时是跟随的
+   * pitch 基线与 roll;仅作用于静止脸状态,指针跟随仍优先。
+   */
+  restGaze?: RestGaze | null;
   /** 是否启用点击 burst 与鼠标 gaze（默认 true） */
   interactive?: boolean;
   /** 暴露命令式 API（burst / swirl） */
@@ -93,6 +102,7 @@ export function MimicBall({
   variant = "ink",
   className,
   gazeOverride = null,
+  restGaze = null,
   interactive = true,
   onReady,
 }: MimicBallProps) {
@@ -121,13 +131,15 @@ export function MimicBall({
   const inkRef = useRef(inkColor);
   const paperRef = useRef(paperColor);
   const gazeOverrideRef = useRef(gazeOverride);
+  const restGazeRef = useRef(restGaze);
   const interactiveRef = useRef(interactive);
   useEffect(() => {
     inkRef.current = inkColor;
     paperRef.current = paperColor;
     gazeOverrideRef.current = gazeOverride;
+    restGazeRef.current = restGaze;
     interactiveRef.current = interactive;
-  }, [inkColor, paperColor, gazeOverride, interactive]);
+  }, [inkColor, paperColor, gazeOverride, restGaze, interactive]);
 
   /* ----- DOM refs（逐帧直写） ----- */
   const bodyGroupRef = useRef<SVGGElement | null>(null);
@@ -244,12 +256,14 @@ export function MimicBall({
             now,
           );
         } else {
-          // 指针跟随：只在静止脸状态生效（其余状态的注视就是动画本身）。
-          // 2026-08-31 用户拍板移除「入场整圈」：目光直接追光标，
-          // 由引擎默认 LOOK_MORPH 0.24s 快速追赶,不再绕球面旋转。
+          // 指针跟随：静止脸状态 + 聆听态(wide)都跟随 —— 录音中球也要看着
+          // 用户(2026-08-31 用户反馈"点击录音后视角锁定")。2026-08-31 同日
+          // 拍板移除「入场整圈」：目光直接追光标，由引擎默认 LOOK_MORPH
+          // 0.24s 快速追赶,不再绕球面旋转。
           const def = STATE_BY_ID.get(stateRef.current);
           const pointer = pointerRef.current;
-          if (def?.baseFace === true && pointer !== null && interactiveRef.current) {
+          const followable = def?.baseFace === true || stateRef.current === "wide";
+          if (followable && pointer !== null && interactiveRef.current) {
             const box = wrapRef.current?.getBoundingClientRect();
             // 无面积的盒子（浏览器窗格隐藏时会出现）没有可瞄准的东西，
             // 且下面的归一化会变成 0/0 —— NaN 会被引擎永久保留
@@ -257,13 +271,16 @@ export function MimicBall({
               aimingRef.current = true;
               const demiW = Math.max(1, window.innerWidth / 2);
               const demiH = Math.max(1, window.innerHeight / 2);
+              // 页面休眠视线同时是跟随的基线(正视页 pitch 基线 0、roll 0)
+              const base = restGazeRef.current;
               engine.setLook(
                 {
                   yaw: clamp((pointer.x - (box.left + box.width / 2)) / demiW, -1, 1) * YAW_MAX,
-                  pitch: PITCH - clamp((pointer.y - (box.top + box.height / 2)) / demiH, -1, 1) * PITCH_MAX,
+                  pitch: (base?.pitch ?? PITCH) - clamp((pointer.y - (box.top + box.height / 2)) / demiH, -1, 1) * PITCH_MAX,
                   mix: 1,
                   spin: 0,
                   wander: 0,
+                  ...(base?.roll === undefined ? {} : { roll: base.roll }),
                 },
                 now,
               );
@@ -272,6 +289,22 @@ export function MimicBall({
             // 光标离开：同样快速回落到休眠姿态，不绕圈
             engine.setLook(null, now);
             aimingRef.current = false;
+          }
+          // 页面级休眠视线（如 chat 页正视）:静止脸且无指针跟随时,
+          // 每帧锚定到页面指定朝向,覆盖引擎默认的 bloub 右上侧脸
+          const rest = restGazeRef.current;
+          if (rest !== null && def?.baseFace === true && !aimingRef.current) {
+            engine.setLook(
+              {
+                yaw: rest.yaw,
+                pitch: rest.pitch,
+                mix: 1,
+                spin: 0,
+                wander: 1,
+                ...(rest.roll === undefined ? {} : { roll: rest.roll }),
+              },
+              now,
+            );
           }
         }
       }
@@ -410,8 +443,8 @@ export function MimicBall({
   return (
     <div
       ref={wrapRef}
-      className={`h-full w-full ${className ?? ""}`}
-      onClick={interactive ? burst : undefined}
+      className={`h-full w-full ${className ?? ""} ${interactive ? "pointer-events-auto" : "pointer-events-none"}`}
+      onClick={interactive ? swirl : undefined}
       style={{ cursor: interactive ? "pointer" : "default" }}
       role="img"
       aria-label={`拟态球：${label}`}

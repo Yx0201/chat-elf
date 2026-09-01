@@ -6,11 +6,11 @@
  * 实时链路:useRealtimeSession → WebRTC → /api/realtime/session → 千问 realtime;
  * 布局按 Ardot 设计稿 §3.3,球是 bloub 引擎的拟态球。
  *
- * 球态映射(spec §3.3,对接 RealtimeStatus):
+ * 球态映射(spec §3.3,对接 RealtimeStatus;2026-09-01 修订):
  * - idle/starting/negotiating → idle(空场待机)
- * - live / user-talking → wide(聆听,麦克风开)
+ * - live / user-talking → wide(聆听 = 好奇表情,bloub curieux)
  * - thinking → thinking(三点脉冲)
- * - assistant-talking → wink(说话回应)
+ * - assistant-talking → 羞怯/怀疑/平静 每 1s 轮换(不再持续 wink)
  * - 出错(active 中) → alert
  * - remember_fact 触发时 flash notify(蓝点)
  *
@@ -42,7 +42,11 @@ import {
   type SeedTranscriptEntry,
 } from "@/lib/realtime/use-realtime-session";
 
-/** RealtimeStatus → 球态(spec §3.3 映射,错误优先) */
+/**
+ * RealtimeStatus → 球态(spec §3.3 映射,错误优先)。
+ * 2026-09-01 拍板:说话不再持续 wink,改由 SPEAKING_FACES 每秒轮换;
+ * 聆听 = 好奇表情(wide 态已按 bloub curieux 重定义)。
+ */
 function ballStateOf(status: RealtimeStatus, error: boolean): BallState {
   if (error) return "alert";
   switch (status) {
@@ -52,11 +56,14 @@ function ballStateOf(status: RealtimeStatus, error: boolean): BallState {
     case "thinking":
       return "thinking";
     case "assistant-talking":
-      return "wink";
+      return "calm";
     default:
       return "idle";
   }
 }
+
+/** 说话表情轮换序列(每 1s 一换,数值取 bloub timide/méfiant/neutre)。 */
+const SPEAKING_FACES: readonly BallState[] = ["shy", "doubt", "calm"];
 
 const STATUS_TEXT: Record<RealtimeStatus, string> = {
   idle: "点麦克风开始通话",
@@ -67,6 +74,10 @@ const STATUS_TEXT: Record<RealtimeStatus, string> = {
   thinking: "想着呢…",
   "assistant-talking": "在说",
 };
+
+/** 对话页的休眠视线(2026-08-31 拍板):三轴全归零的彻底正视(不歪头、不仰视);
+ *  跟随的 pitch 基线与 roll 也取它。登录/记忆等页保持 bloub 侧脸。 */
+const CHAT_REST_GAZE = { yaw: 0, pitch: 0, roll: 0 } as const;
 
 /** 字幕条目(含播种的历史);dbId 落库后回填,有它才能打 👍/👎 */
 interface CaptionEntry {
@@ -175,6 +186,20 @@ export function MimicChatPanel({
   useEffect(() => {
     ball.setBallState(ballState);
   }, [ball, ballState]);
+
+  // 说话表情轮换(2026-09-01 拍板,同日改 3s):assistant-talking 期间每 3s 在
+  // 羞怯 → 怀疑 → 平静 间切换。声明在基础映射之后,起手即覆盖为羞怯;
+  // 离开说话态时清定时器,基础映射效应把球态接到对应状态。
+  useEffect(() => {
+    if (session.status !== "assistant-talking") return;
+    let i = 0;
+    ball.setBallState(SPEAKING_FACES[0] ?? "calm");
+    const timer = window.setInterval(() => {
+      i = (i + 1) % SPEAKING_FACES.length;
+      ball.setBallState(SPEAKING_FACES[i] ?? "calm");
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [ball, session.status]);
 
   /* ---------------- 持久化(转写落库 + 会话结束兜底抽取) ---------------- */
 
@@ -304,23 +329,54 @@ export function MimicChatPanel({
       <main className="flex flex-1 flex-col items-center justify-center gap-4 overflow-y-auto px-6 py-6 lg:gap-5">
         {mode === "company" ? (
           <>
-            <BallAnchor state={ballState} className="h-[200px] w-[200px] lg:h-[280px] lg:w-[280px]" />
+            <BallAnchor
+              state={ballState}
+              restGaze={CHAT_REST_GAZE}
+              className="h-[200px] w-[200px] lg:h-[280px] lg:w-[280px]"
+            />
             <p className="text-base font-medium text-[#37352E] lg:text-lg">{STATUS_TEXT[session.status]}</p>
-            <p className="max-w-[520px] text-center text-sm leading-[1.55] text-[#5D5B54] lg:text-base">
-              {companyCaption === null
-                ? "点击下方麦克风,开始和 TA 说话。"
-                : companyCaption === ""
-                  ? "（沉默也是陪伴的一部分）"
-                  : companyCaption}
-            </p>
-            {companyElf !== "" ? (
-              <p className="max-w-[520px] text-center text-sm leading-[1.55] text-[#37352E] lg:text-base">
-                “{companyElf}”
-                {elfSpeaking ? <span className="ml-0.5 animate-pulse">▍</span> : null}
-              </p>
-            ) : null}
+
+            {/* 字幕矩形(2026-08-31 拍板):固定高度、内容底部对齐 —— 新字幕把旧字幕
+                一点点往上顶,越过上缘即被裁掉;上缘再叠一层渐变淡出 + 渐进模糊,
+                让"正在消失"过渡柔和。不可选中、无滚动条(overflow-hidden)。
+                高度预算:1280×720 桌面留给正文约 150px,防页面出现滚动。 */}
+            <div
+              className="relative h-[160px] w-full max-w-[560px] select-none overflow-hidden lg:h-[150px] lg:max-w-[640px]"
+              style={{
+                maskImage:
+                  "linear-gradient(to bottom, transparent 0px, rgba(0,0,0,0.3) 26px, #000 68px)",
+                WebkitMaskImage:
+                  "linear-gradient(to bottom, transparent 0px, rgba(0,0,0,0.3) 26px, #000 68px)",
+              }}
+            >
+              {/* 上缘渐进模糊层:越靠上越糊,与容器淡出叠加 */}
+              <div
+                aria-hidden
+                className="pointer-events-none absolute inset-x-0 top-0 h-14 backdrop-blur-[3px]"
+                style={{
+                  maskImage: "linear-gradient(to bottom, #000, transparent)",
+                  WebkitMaskImage: "linear-gradient(to bottom, #000, transparent)",
+                }}
+              />
+              <div className="flex h-full flex-col items-center justify-end gap-4 px-3 pb-1 text-center">
+                <p className="max-w-[520px] text-sm leading-[1.55] text-[#5D5B54] lg:text-base">
+                  {companyCaption === null
+                    ? "点击下方麦克风,开始和 TA 说话。"
+                    : companyCaption === ""
+                      ? "（沉默也是陪伴的一部分）"
+                      : companyCaption}
+                </p>
+                {companyElf !== "" ? (
+                  <p className="max-w-[520px] text-sm leading-[1.55] text-[#37352E] lg:text-base">
+                    “{companyElf}”
+                    {elfSpeaking ? <span className="ml-0.5 animate-pulse">▍</span> : null}
+                  </p>
+                ) : null}
+              </div>
+            </div>
+
             <p className="hidden text-[13px] text-[#A4A097] lg:block">
-              鼠标跟随转向 · 点击 burst 彩虹 · 思考时裂成三点 · 说话时 wink
+              鼠标跟随转向 · 点击千鸟纹波 · 思考时裂成三点 · 说话时 wink
             </p>
           </>
         ) : (

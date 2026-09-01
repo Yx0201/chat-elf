@@ -98,6 +98,17 @@ export class RemoteAudioPlayer {
     this.fadeFrame = requestAnimationFrame(step);
   }
 
+  /**
+   * 思考保持(2026-09-01 thinking 防闪烁闸门):暂停播放但**不**重挂流 ——
+   * 抖动缓冲保留,resume() 时从暂停处继续,回复的语音头不会被丢弃。
+   * 与 interrupt() 的区别就在于此:interrupt 要丢掉残余(用户打断了,
+   * 旧答案作废),hold 要留着(thinking 演示完接着播)。
+   */
+  hold(): void {
+    cancelAnimationFrame(this.fadeFrame);
+    this.element?.pause();
+  }
+
   /** 恢复出声(response.created / 新一轮回答开始时调用)。 */
   resume(): void {
     cancelAnimationFrame(this.fadeFrame);

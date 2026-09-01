@@ -34,6 +34,12 @@ const SESSION_SIGNALING_PATH = "/api/realtime/session";
 /** 单会话内模型调用工具的次数上限(spec T2 的防滥用要求)。 */
 const MAX_TOOL_CALLS_PER_SESSION = 10;
 
+/* ------- thinking 导演(2026-09-01 拍板):防思考态闪烁 ------- */
+/** 用户说完后超过此时长仍无回复,才显示 thinking(之前保持聆听态)。 */
+const THINK_DELAY_MS = 2000;
+/** thinking 一旦显示,至少演示此时长才放出语音与字幕(防一闪而过)。 */
+const THINK_MIN_MS = 1000;
+
 const REMEMBER_FACT_CATEGORIES: readonly string[] = [
   "fact",
   "preference",
@@ -335,6 +341,67 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
   const optionsRef = useRef(options);
   /** 本会话已处理的工具调用次数(防滥用上限);每次 start 重置 */
   const toolCallsRef = useRef(0);
+
+  /* ------- thinking 导演的运行件(全部 ref,事件回调内读写) -------
+   * 生命周期:speech_stopped 起 2s 计时 → 到点仍无回复则显示 thinking 并
+   * 进入 held(音频 hold + 字幕缓冲);回复到达后,补足 1s 最短演示再放出。
+   * 用户在任意时刻重新说话 = 打断,丢弃 held 缓存(与 barge-in 语义一致)。 */
+  const thinkTimerRef = useRef<number | null>(null);
+  const thinkingSinceRef = useRef<number | null>(null);
+  const heldRef = useRef(false);
+  const replyArrivedRef = useRef(false);
+  const heldDeltasRef = useRef("");
+  const heldSettleRef = useRef<{ fallback: string } | null>(null);
+  const releaseTimerRef = useRef<number | null>(null);
+
+  const clearThinkTimers = useCallback(() => {
+    if (thinkTimerRef.current !== null) {
+      window.clearTimeout(thinkTimerRef.current);
+      thinkTimerRef.current = null;
+    }
+    if (releaseTimerRef.current !== null) {
+      window.clearTimeout(releaseTimerRef.current);
+      releaseTimerRef.current = null;
+    }
+  }, []);
+
+  /** 放弃 held 缓存(用户打断 / 会话结束)。 */
+  const abortHold = useCallback(() => {
+    clearThinkTimers();
+    thinkingSinceRef.current = null;
+    heldRef.current = false;
+    replyArrivedRef.current = false;
+    heldDeltasRef.current = "";
+    heldSettleRef.current = null;
+  }, [clearThinkTimers]);
+
+  /** 释放闸门:冲刷缓冲的助手字幕、恢复播放、切入说话态。 */
+  const releaseHold = useCallback(() => {
+    releaseTimerRef.current = null;
+    if (!heldRef.current) return;
+    heldRef.current = false;
+    thinkingSinceRef.current = null;
+    if (heldDeltasRef.current !== "") {
+      dispatch({ kind: "assistant-delta", delta: heldDeltasRef.current });
+      heldDeltasRef.current = "";
+    }
+    if (heldSettleRef.current !== null) {
+      dispatch({ kind: "assistant-settle", fallback: heldSettleRef.current.fallback });
+      heldSettleRef.current = null;
+    }
+    playerRef.current?.resume();
+    dispatch({ kind: "status", status: "assistant-talking" });
+  }, []);
+
+  /** held 中回复事件到达时调用:最短演示期未满则预约到点释放。 */
+  const scheduleRelease = useCallback(() => {
+    if (!heldRef.current || !replyArrivedRef.current) return;
+    if (releaseTimerRef.current !== null) return;
+    const since = thinkingSinceRef.current ?? performance.now();
+    const wait = Math.max(0, since + THINK_MIN_MS - performance.now());
+    releaseTimerRef.current = window.setTimeout(() => releaseHold(), wait);
+  }, [releaseHold]);
+
   // react-hooks/refs:渲染期禁止写 ref,统一在渲染后同步
   useEffect(() => {
     optionsRef.current = options;
@@ -352,6 +419,13 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
   const sendSessionUpdate = useCallback(() => {
     const opts = optionsRef.current;
     const defaults = opts.sessionDefaults ?? DASHSCOPE_SESSION_DEFAULTS;
+    // 音色只在支持它的通道下发:longan* 系统音色属于 qwen-audio-3.0 系列
+    // (tokenplan 通道);dashscope 的 qwen3.5-omni 有自己的音色集(默认 Tina),
+    // 把 longan* 传过去会 400 InvalidParameter(2026-08-31 实测踩坑)。
+    const voice =
+      opts.voice !== undefined && defaults.provider === "tokenplan"
+        ? { voice: opts.voice }
+        : {};
     const ok = sendClientEvent({
       type: "session.update",
       session: {
@@ -359,7 +433,7 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
         input_audio_format: "pcm",
         output_audio_format: "pcm",
         instructions: opts.instructions ?? DEFAULT_INSTRUCTIONS,
-        ...(opts.voice === undefined ? {} : { voice: opts.voice }),
+        ...voice,
         // 通道差异参数(转写配置 / turn_detection / idle_timeout)由预设注入
         ...defaults.sessionUpdate,
       },
@@ -439,13 +513,26 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
             sendClientEvent({ type: "response.cancel" });
           }
           playerRef.current?.interrupt();
+          abortHold(); // 用户重新说话 = 打断:丢弃 thinking 计时与 held 缓存
           dispatch({ kind: "barge-in" });
           dispatch({ kind: "user-emotion", emotion: null }); // 新话语,情绪待 ASR 增量刷新
           dispatch({ kind: "status", status: "user-talking" });
           break;
         case "input_audio_buffer.speech_stopped":
-          // 用户话说完了:进入思考窗口(轮次检测计时 → 首包响应),打断自己会先回到 user-talking
-          dispatch({ kind: "status", status: "thinking" });
+          // 用户话说完了:2s 内回复到达则全程不显示 thinking(response.created
+          // 会清掉计时);超时才演示 thinking,并闸住语音与字幕防一闪而过。
+          abortHold(); // 清掉上一轮可能残留的计时/缓存
+          thinkTimerRef.current = window.setTimeout(() => {
+            thinkTimerRef.current = null;
+            if (!aliveRef.current) return;
+            thinkingSinceRef.current = performance.now();
+            heldRef.current = true;
+            replyArrivedRef.current = false;
+            heldDeltasRef.current = "";
+            heldSettleRef.current = null;
+            playerRef.current?.hold(); // 暂停但保留抖动缓冲,释放时接着播
+            dispatch({ kind: "status", status: "thinking" });
+          }, THINK_DELAY_MS);
           break;
         case "conversation.item.input_audio_transcription.delta": {
           const combined = (event.text ?? "") + (event.stash ?? "");
@@ -467,16 +554,34 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
           break;
         case "response.created":
           inFlightResponseRef.current = true;
-          playerRef.current?.resume();
           if (prosodyRef.current !== null) prosodyRef.current.samples = []; // 新话语重新累积韵律
           dispatch({ kind: "response-arm" });
+          if (heldRef.current) {
+            // thinking 演示中:回复已到,补足最短演示期后统一放出
+            replyArrivedRef.current = true;
+            scheduleRelease();
+            break;
+          }
+          clearThinkTimers(); // 2s 内回复:全程不显示 thinking
+          playerRef.current?.resume();
           dispatch({ kind: "status", status: "assistant-talking" });
           break;
         case "response.audio_transcript.delta":
+          if (heldRef.current) {
+            // 闸门期:字幕先进缓冲,释放时一次性冲刷
+            heldDeltasRef.current += event.delta ?? "";
+            break;
+          }
           dispatch({ kind: "assistant-delta", delta: event.delta ?? "" });
           break;
         case "response.audio_transcript.done":
           // 定稿流式累积;随后的 response.done 发现已定稿仅做清理
+          if (heldRef.current) {
+            heldSettleRef.current = { fallback: event.transcript ?? "" };
+            replyArrivedRef.current = true;
+            scheduleRelease();
+            break;
+          }
           dispatch({ kind: "assistant-settle", fallback: event.transcript ?? "" });
           break;
         case "response.done": {
@@ -485,6 +590,13 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
             .flatMap((item) => item.content ?? [])
             .map((part) => part.transcript ?? part.text ?? "")
             .find((text) => text.trim() !== "");
+          if (heldRef.current) {
+            // 整个回复在闸门期内就生成完了:同样等最短演示期后一并放出
+            heldSettleRef.current = { fallback: fallback ?? "" };
+            replyArrivedRef.current = true;
+            scheduleRelease();
+            break;
+          }
           dispatch({ kind: "assistant-settle", fallback: fallback ?? "" });
           dispatch({ kind: "status", status: "live" });
           break;
@@ -535,7 +647,7 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
           break;
       }
     },
-    [gateMedia, sendClientEvent, sendSessionUpdate],
+    [gateMedia, sendClientEvent, sendSessionUpdate, abortHold, clearThinkTimers, scheduleRelease],
   );
 
   const bindChannel = useCallback(
@@ -584,12 +696,13 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
   }, []);
 
   const stop = useCallback(() => {
+    abortHold();
     teardown();
     dispatch({ kind: "status", status: "idle" });
     dispatch({ kind: "reset-partial" });
     dispatch({ kind: "user-emotion", emotion: null });
     dispatch({ kind: "prosody-mood", mood: null });
-  }, [teardown]);
+  }, [abortHold, teardown]);
 
   const start = useCallback(async () => {
     if (aliveRef.current) return;

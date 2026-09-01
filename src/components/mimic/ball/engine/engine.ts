@@ -55,6 +55,12 @@ export interface Look {
   mix: number;
   spin: number;
   wander: number;
+  /**
+   * 头部翻滚(roll)覆盖,度。缺省 = 沿用状态姿态的 roll(bloub 全员 -13°
+   * 歪头);页面级休眠视线(如 chat 正视)可传 0 归平。lerpLook 对缺省侧
+   * 取对侧值,保证混合期间单调、无跳变。
+   */
+  roll?: number;
 }
 
 export const NO_LOOK: Look = { yaw: 0, pitch: 0, mix: 0, spin: 0, wander: 1 };
@@ -65,6 +71,7 @@ const lerpLook = (a: Look, b: Look, t: number): Look => ({
   mix: lerp(a.mix, b.mix, t),
   spin: lerp(a.spin, b.spin, t),
   wander: lerp(a.wander, b.wander, t),
+  roll: a.roll === undefined && b.roll === undefined ? undefined : lerp(a.roll ?? (b.roll as number), b.roll ?? (a.roll as number), t),
 });
 
 const lerpEye = (a: Pose["eyes"][number], b: Pose["eyes"][number], t: number) => ({
@@ -135,7 +142,7 @@ export class BotEngine {
    * 非 finite 的目标被拒收：引擎保留最后一个有效目标，一个 NaN 会永远赖着。
    */
   setLook(look: Look | null, now: number, morph = BotEngine.LOOK_MORPH): void {
-    if (look && !Number.isFinite(look.yaw + look.pitch + look.mix + look.spin + look.wander)) {
+    if (look && !Number.isFinite(look.yaw + look.pitch + look.mix + look.spin + look.wander + (look.roll ?? 0))) {
       return;
     }
     this.lookPrev = this.lookAtTime(now);
@@ -228,11 +235,11 @@ export class BotEngine {
 
     const gaze = {
       // look 的两轴替换（而非叠加）姿态的对应轴；spin 在路径上扣减。
-      // 漂移在混合之后追加：它必须在一颗转开的头上存活。
+      // roll 同理可选替换(页面级正视等);漂移在混合之后追加：它必须在一颗转开的头上存活。
       yaw: lerp(pose.gaze.yaw, look.yaw, look.mix) + life.dYaw - look.spin,
       pitch: lerp(pose.gaze.pitch, look.pitch, look.mix) + life.dPitch,
       // 翻滚不跟随指针：头部倾角是签名，被指针带着转会毁掉它
-      roll: pose.gaze.roll + life.dRoll,
+      roll: (look.roll ?? pose.gaze.roll) + life.dRoll,
     };
 
     // 状态切换触发的眨眼，叠加在日历之上
