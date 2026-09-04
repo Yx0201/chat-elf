@@ -163,15 +163,20 @@ export function MimicChatPanel({
   const [sheetOpen, setSheetOpen] = useState(false);
   const [modeBusy, setModeBusy] = useState(false);
   const modeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   /** 爆散编排(bloub burst 态:0.7s 塌缩 → 粒子螺旋 → 1.7s 起重组定型) */
   function toggleMode(): void {
     if (modeBusy) return;
     if (mode === "company") {
-      // 陪伴 → 字幕:彩虹爆散,粒子散开后球淡出、字幕聊天记录接上
+      // 陪伴 → 字幕:彩虹爆散,粒子散开后球淡出、字幕聊天记录接上。
+      // 球层淡出 300ms,提前至 850ms 发起 dismiss,让球恰好消失在字幕落地
+      // (1150ms)的那一刻 —— 否则锚点卸载的 320ms 延迟会让塌缩后的小黑球
+      // 与对话记录同屏约 600ms(2026-09-04 用户反馈的残留)。
       setModeBusy(true);
       ball.triggerBurst();
+      dismissTimerRef.current = setTimeout(() => ball.dismiss(), 850);
       modeTimerRef.current = setTimeout(() => {
         setMode("transcript");
         setModeBusy(false);
@@ -189,6 +194,7 @@ export function MimicChatPanel({
   useEffect(() => {
     return () => {
       if (modeTimerRef.current !== null) clearTimeout(modeTimerRef.current);
+      if (dismissTimerRef.current !== null) clearTimeout(dismissTimerRef.current);
     };
   }, []);
 
@@ -472,15 +478,27 @@ export function MimicChatPanel({
           onClick={session.toggle}
           disabled={session.status === "starting" || session.status === "negotiating"}
           aria-label={active ? "结束通话" : "开始通话"}
-          className={`flex h-14 w-14 items-center justify-center rounded-full text-white transition-colors disabled:cursor-not-allowed disabled:opacity-50 lg:h-16 lg:w-16 ${
-            active ? "bg-[#5645D4] hover:bg-[#4536A8]" : "bg-[#C8C4BE] hover:bg-[#B5B1AA]"
-          }`}
+          className="flex h-14 w-14 items-center justify-center rounded-full bg-[#5645D4] text-white transition-colors hover:bg-[#4536A8] disabled:cursor-not-allowed disabled:opacity-50 lg:h-16 lg:w-16"
         >
-          <svg viewBox="0 0 24 24" className="h-6 w-6" fill="currentColor" aria-hidden>
+          <svg viewBox="0 0 24 24" className="h-6 w-6" aria-hidden>
             {active ? (
-              <path d="M4 20 20 4M15 5l4 4M9 4 4 9m8 2.5a3.5 3.5 0 0 1-1 2.46A3.5 3.5 0 0 1 5 11m14 0a7 7 0 0 1-10.5 6.07A7 7 0 0 1 5 11" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" />
+              <>
+                {/* 通话中:同款麦克风 + 斜线;掩码在斜线处切开麦克风留缝,白线才可见 */}
+                <defs>
+                  <mask id="mic-slash-cut">
+                    <rect x="0" y="0" width="24" height="24" fill="#fff" />
+                    <line x1="4" y1="4" x2="20" y2="20" stroke="#000" strokeWidth="4.5" strokeLinecap="round" />
+                  </mask>
+                </defs>
+                <path
+                  d="M12 15a4 4 0 0 0 4-4V6a4 4 0 1 0-8 0v5a4 4 0 0 0 4 4Zm6-4a6 6 0 0 1-12 0H4a8 8 0 0 0 7 7.93V22h2v-3.07A8 8 0 0 0 20 11h-2Z"
+                  fill="currentColor"
+                  mask="url(#mic-slash-cut)"
+                />
+                <line x1="4" y1="4" x2="20" y2="20" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </>
             ) : (
-              <path d="M12 15a4 4 0 0 0 4-4V6a4 4 0 1 0-8 0v5a4 4 0 0 0 4 4Zm6-4a6 6 0 0 1-12 0H4a8 8 0 0 0 7 7.93V22h2v-3.07A8 8 0 0 0 20 11h-2Z" />
+              <path d="M12 15a4 4 0 0 0 4-4V6a4 4 0 1 0-8 0v5a4 4 0 0 0 4 4Zm6-4a6 6 0 0 1-12 0H4a8 8 0 0 0 7 7.93V22h2v-3.07A8 8 0 0 0 20 11h-2Z" fill="currentColor" />
             )}
           </svg>
         </button>

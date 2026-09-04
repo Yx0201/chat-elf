@@ -50,6 +50,12 @@ export interface BallCtl {
   swirl(): void;
   /** 路由跳转前预演下一场景的常态球态：morph 立刻开始，与页面切换时间重叠 */
   presetMorph(state: BallState): void;
+  /**
+   * 立即开始隐藏常驻球层(模式切换编排用)。与 unregisterAnchor 的 320ms
+   * 延迟不同——那是给路由转场留"下一页锚点接管"的窗口;同页模式切换
+   * 没有下一个锚点,不该等,否则缩小中的球会与新模式内容同屏残留。
+   */
+  dismiss(): void;
   /** gaze 方向覆盖（-1..1），null 回退鼠标跟随 */
   setGazeDir(dir: { x: number; y: number } | null): void;
   /** 整球倾斜角（历史页滚动 → 彗星尾巴相位） */
@@ -138,6 +144,11 @@ export function BallProvider({ children }: { children: ReactNode }) {
     setTiltState(deg);
   }, []);
 
+  const dismiss = useCallback(() => {
+    clearTimeout(hideTimer.current);
+    setVisible(false);
+  }, []);
+
   const ctl = useMemo<BallCtl>(
     () => ({
       registerAnchor,
@@ -149,8 +160,9 @@ export function BallProvider({ children }: { children: ReactNode }) {
       presetMorph,
       setGazeDir,
       setTilt,
+      dismiss,
     }),
-    [registerAnchor, unregisterAnchor, setBallState, flash, triggerBurst, swirl, presetMorph, setGazeDir, setTilt],
+    [registerAnchor, unregisterAnchor, setBallState, flash, triggerBurst, swirl, presetMorph, setGazeDir, setTilt, dismiss],
   );
 
   useEffect(
