@@ -28,8 +28,15 @@ export const DASHSCOPE_SESSION_DEFAULTS: RealtimeSessionDefaults = {
   provider: "dashscope",
   sessionUpdate: {
     input_audio_transcription: { model: "qwen3-asr-flash-realtime" },
-    // 闲聊定位:静默 8s 后模型主动抛话头(仅 qwen3.5 omni 系列支持)
-    turn_detection: { type: "server_vad", idle_timeout_ms: 8000 },
+    turn_detection: {
+      type: "server_vad",
+      // 用户思考时常有几百毫秒停顿后继续说,默认 800ms 会把话截成两段
+      // (2026-09-02 用户反馈)。提到 1200ms:短暂停顿不再误判说完,
+      // 代价是回复起点延后约 0.4s。取值范围 [200,6000](client-events 文档)。
+      silence_duration_ms: 1200,
+      // 闲聊定位:静默 8s 后模型主动抛话头(仅 qwen3.5 omni 系列支持)
+      idle_timeout_ms: 8000,
+    },
   },
 };
 

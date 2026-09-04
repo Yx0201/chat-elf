@@ -87,7 +87,9 @@ export class RemoteAudioPlayer {
     const startVolume = el.volume;
     const startedAt = performance.now();
     const step = (now: number): void => {
-      const progress = Math.min(1, (now - startedAt) / FADE_OUT_MS);
+      // rAF 回调的时间戳可能比 performance.now() 早几毫秒,不封下限会算出
+      // 负 progress → 音量 = 1.0425 之类超 1 的值 → IndexSizeError(打断必现)
+      const progress = Math.min(1, Math.max(0, (now - startedAt) / FADE_OUT_MS));
       el.volume = startVolume * (1 - progress);
       if (progress < 1) {
         this.fadeFrame = requestAnimationFrame(step);
