@@ -61,11 +61,14 @@ export function MimicMemoryList({
   memories,
   profileSummary,
   persistence,
+  latestConversationId,
 }: {
   memories: readonly MemoryListItem[];
   /** user_profile.summary 的文本;无画像时为空 */
   profileSummary: string;
   persistence: boolean;
+  /** 最近一场会话 id;"回到对话"直达它,免去 /chat 入口的服务端重定向一跳 */
+  latestConversationId: string | null;
 }) {
   const ball = useBall();
   const router = useRouter();
@@ -83,7 +86,12 @@ export function MimicMemoryList({
     if (returningRef.current) return;
     returningRef.current = true;
     ball.presetMorph("idle");
-    window.setTimeout(() => router.push("/chat"), 130);
+    // 直达最近会话(重定向路径会产生 3 次请求:入口+跟随+提交);没有会话时回落 /chat 的开始表单
+    window.setTimeout(
+      () =>
+        router.push(latestConversationId !== null ? `/chat/${latestConversationId}` : "/chat"),
+      130,
+    );
   }
 
   function handleItemClick(): void {

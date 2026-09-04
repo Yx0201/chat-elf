@@ -13,6 +13,7 @@
 import { MimicMemoryList } from "@/components/mimic/mimic-memory-list";
 import { requirePageUserId } from "@/lib/auth/session";
 import { isDatabaseConfigured } from "@/lib/db/client";
+import { listConversations } from "@/lib/memory/conversations";
 import { getProfile } from "@/lib/memory/profile";
 import { listMemories, type MemoryListItem } from "@/lib/memory/store";
 
@@ -22,15 +23,20 @@ export const dynamic = "force-dynamic";
 export default async function MemoryPage() {
   const userId = await requirePageUserId();
   const persistence = isDatabaseConfigured();
-  const [memories, profile] = persistence
-    ? await Promise.all([listMemories(userId), getProfile(userId)])
-    : [[], null];
+  const [memories, profile, latest] = persistence
+    ? await Promise.all([
+        listMemories(userId),
+        getProfile(userId),
+        listConversations(userId, 1),
+      ])
+    : [[], null, []];
 
   return (
     <MimicMemoryList
       memories={memories satisfies MemoryListItem[]}
       profileSummary={profile?.summary ?? ""}
       persistence={persistence}
+      latestConversationId={latest[0]?.id ?? null}
     />
   );
 }
