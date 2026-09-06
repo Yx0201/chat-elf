@@ -114,6 +114,45 @@ export async function searchKnowledgeAction(input: {
 }
 
 /**
+ * 语音线的联网搜索执行体(step3):realtime 模型 web_search 工具的回调。
+ * 失败语义与 searchKnowledgeAction 一致 —— **永不抛错**,返回可朗读降级。
+ */
+export async function webSearchAction(input: { query: string }): Promise<{ context: string }> {
+  const userId = await requireActionUserId();
+  if (userId === null) {
+    return { context: "联网搜索暂不可用,请基于已有知识自然回应。" };
+  }
+
+  const query = input.query.trim().slice(0, 200);
+  if (query === "") {
+    return { context: "搜索词为空,请直接基于已有知识回答。" };
+  }
+
+  try {
+    const { webSearch } = await import("@/lib/ai/web-search");
+    const result = await webSearch(query);
+    if (result.answer === "" && result.sources.length === 0) {
+      return { context: "联网没有搜到相关内容,请如实告知用户并基于已有知识回应。" };
+    }
+    const sourceLines = result.sources
+      .slice(0, 5)
+      .map((source) => `- ${source.title}(${source.siteName})`)
+      .join("\n");
+    return {
+      context:
+        `以下是联网检索摘要:\n\n${result.answer}` +
+        (sourceLines === "" ? "" : `\n\n来源:\n${sourceLines}`) +
+        `\n\n请只依据以上摘要回答,摘要里没有的日期/数字不要自行补充;回答时至少口头提及一个来源站点。`,
+    };
+  } catch (error) {
+    console.error("[knowledge] 语音联网搜索失败(降级):", error instanceof Error ? error.message : error);
+    return {
+      context: "联网搜索暂时不可用,请告知用户稍后再试,先基于已有知识回应。",
+    };
+  }
+}
+
+/**
  * 检索测试(KB 详情页面板)。检索失败返回可读错误而非抛出 ——
  * 面板是调试工具,把错误亮出来比静默更有用。
  */

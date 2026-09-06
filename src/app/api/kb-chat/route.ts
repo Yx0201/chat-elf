@@ -1,8 +1,9 @@
 /**
  * 知识库文本问答流式路由(step2 T6,Route Handler 例外第 7 个:流式响应)。
  *
- * agent 检索模式:streamText + search_knowledge 工具 + isStepCount(6) 护栏,
- * 模型自主决定查什么/查几次;跨调用维护全局 [N] 引用编号(codeweaver 经验),
+ * agent 检索模式:streamText + search_knowledge / web_search 双工具 +
+ * isStepCount(6) 护栏,模型自主决定查什么/查几次(三分路由:资料→知识库、
+ * 时效公域→联网、其余直接答);跨调用维护全局 [N] 引用编号(codeweaver 经验),
  * 引用列表经 messageMetadata(finish 时闭包内已完整)下发客户端,并持久化到
  * kb_messages.metadata(刷新还原)。
  *
@@ -16,12 +17,17 @@ import {
   isStepCount,
   streamText,
   toUIMessageStream,
+  tool,
   type UIMessage,
 } from "ai";
+import { z } from "zod";
 import { getSessionUserId } from "@/lib/auth/session";
 import { getDashScopeProvider, isAiConfigured, TEXT_MODEL, textModelProviderOptions } from "@/lib/ai/provider";
+import { webSearch, type WebSearchResult } from "@/lib/ai/web-search";
+import { currentDateLabel } from "@/lib/time-label";
 import { getKnowledgeBase, isValidKbId } from "@/lib/knowledge/repository";
 import { defineSearchKnowledgeTool } from "@/lib/knowledge/search/tool";
+import { WEB_SEARCH_DESCRIPTION } from "@/lib/knowledge/search/tool-shared";
 import { buildSearchContext, TEXT_CHAT_BUDGET } from "@/lib/knowledge/search/context-builder";
 import { searchKnowledge } from "@/lib/knowledge/search/search-service";
 import {
@@ -119,7 +125,7 @@ export async function POST(req: Request) {
     const built = buildSearchContext(items, TEXT_CHAT_BUDGET);
     const offset = references.length;
     for (const ref of built.references) {
-      references.push({ ...ref, index: offset + ref.index });
+      references.push({ ...ref, kind: "kb", index: offset + ref.index });
     }
     // 单次检索的局部 [1..n] 重编号为全局连续编号
     const renumbered = built.context.replace(/\[(\d+)\]/g, (_, n: string) => {
@@ -129,10 +135,43 @@ export async function POST(req: Request) {
     return `以下是知识库检索结果([N] 对应引用列表编号):\n\n${renumbered}`;
   });
 
+  // 联网搜索工具(step3):执行端为原生 API,来源并入同一全局引用编号
+  const webSearchTool = tool({
+    description: WEB_SEARCH_DESCRIPTION,
+    inputSchema: z.object({ query: z.string().min(1) }),
+    execute: async (input) => {
+      let result: WebSearchResult;
+      try {
+        result = await webSearch(input.query.slice(0, 200));
+      } catch (error) {
+        console.error("[kb-chat] web_search 失败:", error instanceof Error ? error.message : error);
+        return "联网搜索暂时不可用,请告知用户稍后再试,或基于已有知识回答。";
+      }
+      const offset = references.length;
+      result.sources.forEach((source, position) => {
+        references.push({
+          index: offset + position + 1,
+          kind: "web",
+          fileId: "",
+          fileName: source.title,
+          chunkId: "",
+          siteName: source.siteName,
+          url: source.url,
+        });
+      });
+      const sourceLines = result.sources
+        .map((source, position) => `[${offset + position + 1}] ${source.title}(${source.siteName})`)
+        .join("\n");
+      return `以下是联网检索摘要与来源([N] 对应引用列表编号):\n\n${result.answer}\n\n来源:\n${sourceLines}\n\n请只依据以上摘要与来源陈述网络信息,摘要里没有的日期/数字不要自行补充;引用处标 [N]。`;
+    },
+  });
+
   const instructions = [
+    `[当前时间] ${currentDateLabel(new Date(), "Asia/Shanghai")}(北京时间)。回答涉及日期时间的问题以此为准;用户说的相对时间(今天/明天/最近)先换算成具体日期。`,
     kb !== null
       ? `你是「${kb.name}」知识库的问答助手。用户在这个知识库里上传了资料,回答与资料相关的问题前先调用 search_knowledge 工具检索,再依据检索结果回答;可以按需多次检索(换关键词)。`
       : "你是知识库问答助手,可通过 search_knowledge 工具检索用户的资料后再回答。",
+    "你也可以调用 web_search 工具联网检索:用于时效性信息(今天/最新/现在,如天气、新闻、价格)或资料之外的公域知识。用户资料里的问题优先 search_knowledge 而非联网;对话上下文已有的信息不要再检索;两类检索都无结果就如实说明,不要编造。",
     "引用资料内容时在句末标注 [N] 角标(N 对应引用列表编号);检索不到的内容要如实说明资料里没有,不要编造。回答用中文,排版清晰。",
   ].join("\n");
 
@@ -146,7 +185,7 @@ export async function POST(req: Request) {
           ...history.map((m) => ({ role: m.role, content: m.content })),
           { role: "user" as const, content: userText },
         ],
-        tools: { searchKnowledge: searchTool },
+        tools: { searchKnowledge: searchTool, webSearch: webSearchTool },
         stopWhen: isStepCount(6),
         providerOptions: textModelProviderOptions(),
         onError: (error) => {

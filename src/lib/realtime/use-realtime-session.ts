@@ -22,10 +22,14 @@ import type { ClientEvent } from "@/lib/realtime/events";
 import { PROSODY_CALIBRATED_VOICE } from "@/lib/persona/voices";
 import { moodFromUserEmotion, prosodyToMood, textMood, type ElfMood, type ProsodySample } from "@/lib/realtime/mood";
 import { parseServerEvent } from "@/lib/realtime/parse-events";
+import { currentDateLabel } from "@/lib/time-label";
 import {
   SEARCH_KNOWLEDGE_REALTIME_TOOL,
   SEARCH_KNOWLEDGE_TOOL_NAME,
+  WEB_SEARCH_REALTIME_TOOL,
+  WEB_SEARCH_TOOL_NAME,
   parseSearchKnowledgeArguments,
+  parseWebSearchArguments,
 } from "@/lib/knowledge/search/tool-shared";
 import {
   DASHSCOPE_SESSION_DEFAULTS,
@@ -40,6 +44,8 @@ const SESSION_SIGNALING_PATH = "/api/realtime/session";
 const MAX_TOOL_CALLS_PER_SESSION = 10;
 /** 单会话内 search_knowledge 的次数上限(step2 T2:护成本,hybrid 单次含多路调用+重排)。 */
 const MAX_SEARCH_CALLS_PER_SESSION = 8;
+/** 单会话内 web_search 的次数上限(step3:网络搜索语音场景又慢又贵,比知识库更紧)。 */
+const MAX_WEB_SEARCH_CALLS_PER_SESSION = 4;
 /** 工具触发到显示检索态的防抖(复用 thinking 闸门的节奏;fast 模式 <2s 完成则全程不显示)。 */
 const SEARCH_DISPLAY_DELAY_MS = 2000;
 
@@ -322,6 +328,11 @@ export interface UseRealtimeSessionOptions {
     query: string;
     mode?: "hybrid" | "fast" | "graph";
   }) => Promise<{ context: string }>;
+  /**
+   * 模型调用 `web_search` 工具时的联网检索执行体(step3,原生 API 执行端)。
+   * 返回摘要+来源的可朗读上下文;不传 = 不注册该工具(模型不联网)。
+   */
+  onWebSearch?: (input: { query: string }) => Promise<{ context: string }>;
 }
 
 export interface UseRealtimeSessionResult extends RealtimeState {
@@ -371,6 +382,8 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
   const toolCallsRef = useRef(0);
   /** 本会话已处理的 search_knowledge 次数;每次 start 重置 */
   const searchCallsRef = useRef(0);
+  /** 本会话已处理的 web_search 次数;每次 start 重置 */
+  const webSearchCallsRef = useRef(0);
   /** 检索在途(已收到 function_call、最终回答未开始):期间 response.done 不回 live 态 */
   const searchPendingRef = useRef(false);
   /** 检索态显示防抖计时(到点仍在检索才切 thinking 展示,防 fast 模式闪烁) */
@@ -468,13 +481,16 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
       opts.voice !== undefined && defaults.provider === "tokenplan"
         ? { voice: opts.voice }
         : {};
+    // 当前时间注入(2026-09-06 实锤:模型没有"今天几号"的概念,不注入则
+    // "明天天气"类问题的相对时间全靠猜)。每次连麦取设备时钟,长会话跨日也新鲜。
+    const timedInstructions = `${opts.instructions ?? DEFAULT_INSTRUCTIONS}\n\n[当前时间] ${currentDateLabel()}(用户当地)。涉及日期时间的回答以此为准;用户说的相对时间(今天/明天/最近)先换算成具体日期再检索或回答。`;
     const ok = sendClientEvent({
       type: "session.update",
       session: {
         modalities: ["text", "audio"],
         input_audio_format: "pcm",
         output_audio_format: "pcm",
-        instructions: opts.instructions ?? DEFAULT_INSTRUCTIONS,
+        instructions: timedInstructions,
         ...voice,
         // 通道差异参数(转写配置 / turn_detection / idle_timeout)由预设注入
         ...defaults.sessionUpdate,
@@ -490,6 +506,7 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
     const tools = [
       ...(opts2.onRememberFact !== undefined ? [REMEMBER_FACT_TOOL] : []),
       ...(opts2.onSearchKnowledge !== undefined ? [SEARCH_KNOWLEDGE_REALTIME_TOOL] : []),
+      ...(opts2.onWebSearch !== undefined ? [WEB_SEARCH_REALTIME_TOOL] : []),
     ];
     if (ok && tools.length > 0) {
       sendClientEvent({
@@ -722,6 +739,68 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
             break;
           }
 
+          if (event.name === WEB_SEARCH_TOOL_NAME) {
+            // 联网搜索工具(step3):与 search_knowledge 同构 —— 模型在等真实
+            // 检索结果,等待期复用检索态(searching + 2s 防抖)承接静默。
+            const callId = event.call_id;
+            webSearchCallsRef.current += 1;
+            if (webSearchCallsRef.current > MAX_WEB_SEARCH_CALLS_PER_SESSION) {
+              sendClientEvent({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: callId,
+                  output: JSON.stringify({ context: "已达本次会话的联网搜索次数上限,请基于已有知识回答并如实告知用户。" }),
+                },
+              });
+              sendClientEvent({ type: "response.create" });
+              break;
+            }
+
+            const webArgs = parseWebSearchArguments(event.arguments);
+            if (webArgs === null) {
+              sendClientEvent({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: callId,
+                  output: JSON.stringify({ context: "搜索参数无效,请基于已有知识回答。" }),
+                },
+              });
+              sendClientEvent({ type: "response.create" });
+              break;
+            }
+
+            searchPendingRef.current = true;
+            dispatch({ kind: "search-start" });
+            clearSearchDisplayTimer();
+            searchDisplayTimerRef.current = window.setTimeout(() => {
+              searchDisplayTimerRef.current = null;
+              if (searchPendingRef.current) dispatch({ kind: "status", status: "thinking" });
+            }, SEARCH_DISPLAY_DELAY_MS);
+
+            void (async () => {
+              let context: string;
+              try {
+                const result = await optionsRef.current.onWebSearch?.(webArgs);
+                context = result?.context ?? "联网搜索暂不可用,请基于已有知识回应。";
+              } catch {
+                context = "联网搜索暂时出错,请告知用户稍后再试。";
+              }
+              if (!aliveRef.current) return;
+              sendClientEvent({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: callId,
+                  output: JSON.stringify({ context }),
+                },
+              });
+              sendClientEvent({ type: "response.create" });
+            })();
+            break;
+          }
+
           if (event.name !== REMEMBER_FACT_TOOL_NAME) break;
 
           // **先回执、再落库**。模型在等 function_call_output,不回就不继续说 ——
@@ -832,6 +911,7 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
     aliveRef.current = true;
     toolCallsRef.current = 0;
     searchCallsRef.current = 0;
+    webSearchCallsRef.current = 0;
     searchPendingRef.current = false;
     dispatch({ kind: "clear-error" });
 

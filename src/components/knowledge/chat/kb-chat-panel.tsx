@@ -168,7 +168,7 @@ export function KbChatPanel({
         {messages.length === 0 ? (
           <div className="mt-10 rounded-xl border border-dashed border-[#E5E3DF] bg-white px-6 py-10 text-center">
             <p className="text-sm text-[#5D5B54]">问点「{kbName}」里有的</p>
-            <p className="mt-1 text-xs text-[#A4A097]">AI 会先检索知识库再回答,引用处带 [N] 角标可溯源</p>
+            <p className="mt-1 text-xs text-[#A4A097]">AI 会按需检索知识库或联网,引用处带 [N] 角标可溯源</p>
           </div>
         ) : (
           <ul className="flex flex-col gap-3 pb-24">
@@ -258,7 +258,22 @@ function MessageBubble({
             <ol className="flex flex-col gap-0.5">
               {references.map((ref) => (
                 <li key={ref.index} id={`cite-${msgKey}-${ref.index}`} className="text-[11px] leading-5 text-[#787671]">
-                  [{ref.index}] 《{ref.fileName}》
+                  {ref.kind === "web" ? (
+                    <>
+                      [{ref.index}] 🌐{" "}
+                      <a
+                        href={ref.url}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="underline decoration-[#C9C6BF] underline-offset-2 hover:text-[#5645D4]"
+                      >
+                        {ref.siteName !== undefined && ref.siteName !== "" ? `${ref.siteName} · ` : ""}
+                        {ref.fileName}
+                      </a>
+                    </>
+                  ) : (
+                    <>[{ref.index}] 📚 《{ref.fileName}》</>
+                  )}
                 </li>
               ))}
             </ol>

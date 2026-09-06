@@ -38,7 +38,7 @@ import { findPersona, resolvePersona } from "@/lib/persona/resolve";
 import type { PersonaRecord } from "@/lib/persona/types";
 import type { PersonaSettings } from "@/lib/persona/settings";
 import { REMEMBER_FACT_USAGE_HINT, type RealtimeSessionDefaults } from "@/lib/realtime/session-defaults";
-import { searchKnowledgeAction } from "@/lib/knowledge/actions";
+import { searchKnowledgeAction, webSearchAction } from "@/lib/knowledge/actions";
 import {
   useRealtimeSession,
   type RealtimeStatus,
@@ -158,6 +158,8 @@ export function MimicChatPanel({
     // 知识库检索工具(step2 T3):realtime 模型自主判断何时查;
     // 失败降级文案在 action 内部处理,这里只透传
     onSearchKnowledge: searchKnowledgeAction,
+    // 联网搜索工具(step3):时效/公域问题查网络,与知识库互补
+    onWebSearch: webSearchAction,
   });
   const { attachMessageId } = session;
 

@@ -13,12 +13,21 @@ export function isValidKbConversationId(id: string): boolean {
   return UUID_RE.test(id);
 }
 
-/** assistant 消息 metadata 的引用条目结构(刷新还原引用 UI)。 */
+/**
+ * assistant 消息 metadata 的引用条目结构(刷新还原引用 UI)。
+ * kb 类引用携带文件/分块定位;web 类引用(step3 联网搜索)携带来源 URL,
+ * fileId/chunkId 为空串占位(旧数据无 kind 字段,按 kb 兜底)。
+ */
 export interface CitationMeta {
   index: number;
+  kind: "kb" | "web";
   fileId: string;
   fileName: string;
   chunkId: string;
+  /** web 引用的来源站点名 */
+  siteName?: string;
+  /** web 引用的来源 URL */
+  url?: string;
 }
 
 /** KB 内(或用户全部)的问答会话列表,最近优先。 */
@@ -124,5 +133,8 @@ export function parseCitationMetadata(metadata: unknown): CitationMeta[] {
       ref !== null &&
       typeof (ref as CitationMeta).index === "number" &&
       typeof (ref as CitationMeta).fileName === "string",
-  );
+  ).map((ref) => ({
+    ...ref,
+    kind: ref.kind === "web" ? "web" : "kb",
+  }));
 }

@@ -73,3 +73,54 @@ export function parseSearchKnowledgeArguments(raw: string | undefined): SearchKn
 
   return { query, mode };
 }
+
+// ── web_search(step3 网络搜索)─────────────────────────────────────────
+// 三分路由的另一半:search_knowledge 管"用户的私域资料",本工具管"时效性
+// 与公域信息"。边界措辞与 search_knowledge 的 description 互补,双线同源。
+
+export const WEB_SEARCH_TOOL_NAME = "web_search";
+
+export const WEB_SEARCH_DESCRIPTION =
+  "联网搜索最新或公共信息。当用户问时效性内容(今天/最近/最新/现在,如天气、新闻、价格、" +
+  "版本发布)或对话上下文与用户资料都没有的公域知识(公众人物、地理常识、技术文档)时调用。" +
+  "用户自己上传资料里的内容不要用本工具,应使用 search_knowledge;模型已知的稳定常识和" +
+  "闲聊陪伴不要调用;刚才已经搜过且上下文已有的信息不重复搜。";
+
+/** realtime session.update 注册用(与 SEARCH_KNOWLEDGE_REALTIME_TOOL 同形状)。 */
+export const WEB_SEARCH_REALTIME_TOOL: {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: { type: "object"; properties: Record<string, unknown>; required: string[] };
+  };
+} = {
+  type: "function",
+  function: {
+    name: WEB_SEARCH_TOOL_NAME,
+    description: WEB_SEARCH_DESCRIPTION,
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "搜索词,自然语句描述要查的内容" },
+      },
+      required: ["query"],
+    },
+  },
+};
+
+export function parseWebSearchArguments(raw: string | undefined): { query: string } | null {
+  if (raw === undefined) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const query =
+    typeof (parsed as Record<string, unknown>).query === "string"
+      ? ((parsed as Record<string, unknown>).query as string).trim().slice(0, 200)
+      : "";
+  return query === "" ? null : { query };
+}
