@@ -7,6 +7,7 @@
 
 import { and, count, desc, eq } from "drizzle-orm";
 import { getDb } from "@/lib/db/client";
+import { createInitialProcessState } from "@/lib/knowledge/ingestion/process-pipeline";
 import {
   documentChunks,
   graphChunks,
@@ -143,14 +144,20 @@ export async function deleteFile(userId: string, fileId: string): Promise<boolea
   return true;
 }
 
-/** failed 文件重置为 uploaded(清进度,从 retrieval 阶段重来)。 */
+/** failed 文件重置为 uploaded(带初始流水线状态,从 retrieval 阶段重来)。 */
 export async function resetFileForRetry(userId: string, fileId: string): Promise<boolean> {
   const db = getDb();
   const file = await getFile(userId, fileId);
   if (file === null || file.status !== "failed") return false;
   await db
     .update(uploadedFiles)
-    .set({ status: "uploaded", metadata: {}, updatedAt: new Date() })
+    .set({
+      status: "uploaded",
+      // 带初始流水线状态(而非清空):清空会让 POST /process 因状态缺失 409,
+      // 推进循环续不上;split 首批会全量 DELETE 旧分块,干净重来。
+      metadata: { process: createInitialProcessState() },
+      updatedAt: new Date(),
+    })
     .where(eq(uploadedFiles.id, fileId));
   return true;
 }

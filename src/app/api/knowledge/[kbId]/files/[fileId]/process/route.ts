@@ -4,7 +4,9 @@
  * GET  :查进度(轮询用,只读 metadata.process)。
  * POST :推进**一个有界批次**(阶段内批量有上限,hobby 函数时长约束下安全),
  *       客户端 250ms 轮询直到 status=completed/failed。
- * 失败:阶段异常 → markPipelineFailed 落库 → 500;用户可 retry(重置状态)。
+ *       进门先原子认领(claimPipelineRun):另一请求在途时直接返回当前状态,
+ *       不重复执行 —— 防刷新/重试造成的 DELETE 互踩(曾致外键断裂)。
+ * 失败:阶段异常 → markPipelineFailed(带 cause 链)落库 → 500;详情页可 retry。
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -12,6 +14,8 @@ import { getSessionUserId } from "@/lib/auth/session";
 import { getFile, isValidFileId, isValidKbId } from "@/lib/knowledge/repository";
 import {
   advancePipeline,
+  claimPipelineRun,
+  formatPipelineError,
   markPipelineFailed,
   parseUploadPipelineState,
   updateFileProcess,
@@ -74,6 +78,27 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
     });
   }
 
+  // failed 只能经详情页「重新处理」重置后推进;旧循环的迟到请求不得复活它。
+  if (file.status === "failed") {
+    return NextResponse.json({
+      fileId: file.id,
+      filename: file.fileName,
+      status: "failed",
+      process: currentState,
+    });
+  }
+
+  const claimed = await claimPipelineRun(fileId);
+  if (!claimed) {
+    // 另一请求正在推进:原样返回,客户端循环稍后再来(认领随其落库释放)。
+    return NextResponse.json({
+      fileId: file.id,
+      filename: file.fileName,
+      status: "processing",
+      process: currentState,
+    });
+  }
+
   try {
     const nextState = await advancePipeline({
       kbId,
@@ -94,10 +119,7 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
     });
   } catch (error) {
     console.error("[knowledge] 文件处理失败:", error);
-    const failedState = markPipelineFailed(
-      currentState,
-      error instanceof Error ? error.message : "文件处理失败",
-    );
+    const failedState = markPipelineFailed(currentState, formatPipelineError(error));
     await updateFileProcess(fileId, failedState, "failed");
 
     return NextResponse.json(

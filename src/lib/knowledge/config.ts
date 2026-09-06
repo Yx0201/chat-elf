@@ -30,6 +30,13 @@ export const GRAPH_BUILD_MAX_CONCURRENCY = readPositiveIntEnv("KB_GRAPH_BUILD_MA
 /** 摄取期 embedding 批大小(DashScope 兼容端点单请求文本数上限以实测为准)。 */
 export const EMBEDDING_BATCH_SIZE = readPositiveIntEnv("KB_EMBEDDING_BATCH_SIZE", 10);
 
+/**
+ * 检索分块阶段单请求处理的父块数。分块必须分批:大文件逐父块两次
+ * 往返,远程库(Vercel 函数→Neon 跨区 ~75ms/次)整文件跑必撞 60s
+ * 函数时长墙;40 父块/批 ≈ 80 次往返 ≈ 7s,留足余量。
+ */
+export const SPLIT_BATCH_SIZE = readPositiveIntEnv("KB_SPLIT_BATCH_SIZE", 40);
+
 // ── 检索 Top-K ──────────────────────────────────────────────────────
 
 export const DEFAULT_VECTOR_TOP_K = readPositiveIntEnv("KB_VECTOR_TOP_K", 50);
