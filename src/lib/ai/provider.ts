@@ -25,8 +25,44 @@ export const DEFAULT_COMPATIBLE_BASE_URL = "https://dashscope.aliyuncs.com/compa
  */
 export const EMBEDDING_MODEL = process.env.DASHSCOPE_EMBEDDING_MODEL?.trim() || "text-embedding-v3";
 
-/** 文本模型(记忆抽取 / 会话摘要)。 */
-export const TEXT_MODEL = process.env.DASHSCOPE_TEXT_MODEL?.trim() || "qwen-plus";
+/**
+ * 向量通道覆盖(2026-09-06):设 EMBEDDING_BASE_URL 后向量走独立的 OpenAI 兼容
+ * 端点(本地 Ollama 等),文本/重排/realtime 不受影响。
+ * 本地开发例:EMBEDDING_BASE_URL=http://localhost:11434/v1
+ *           DASHSCOPE_EMBEDDING_MODEL=qwen3-embedding:4b(原生 2560 维,
+ *           经 MRL dimensions=1024 截断,与库列保持一致)。
+ * 生产不设 = 与文本同走 DashScope 兼容端点。
+ * ⚠️ 不同模型的向量空间互不兼容:切换后旧向量需重新生成(知识库重新摄取,
+ *   记忆向量置 NULL 降级),不可混用。
+ */
+export const EMBEDDING_BASE_URL = process.env.EMBEDDING_BASE_URL?.trim() || null;
+/** 覆盖端点的 API Key(Ollama 无鉴权,占位即可)。 */
+export const EMBEDDING_API_KEY = process.env.EMBEDDING_API_KEY?.trim() || "ollama";
+
+const EMBEDDING_OVERRIDE_PROVIDER_NAME = "local-embedding";
+
+/** 向量模型 + 其 provider 名(providerOptions 的 dimensions 要按名挂)。 */
+export function getEmbeddingChannel(): {
+  model: ReturnType<ReturnType<typeof createOpenAICompatible>["textEmbeddingModel"]>;
+  providerName: string;
+} {
+  if (EMBEDDING_BASE_URL !== null) {
+    const provider = createOpenAICompatible({
+      name: EMBEDDING_OVERRIDE_PROVIDER_NAME,
+      apiKey: EMBEDDING_API_KEY,
+      baseURL: EMBEDDING_BASE_URL,
+    });
+    return { model: provider.textEmbeddingModel(EMBEDDING_MODEL), providerName: EMBEDDING_OVERRIDE_PROVIDER_NAME };
+  }
+  return { model: getDashScopeProvider().textEmbeddingModel(EMBEDDING_MODEL), providerName: "dashscope" };
+}
+
+/**
+ * 文本模型(记忆抽取 / 会话摘要 / 知识库图谱抽取与摘要)。
+ * 2026-09-06 起默认 ZHIPU/GLM-5.3-Flash(用户拍板);该模型需在百炼控制台
+ * 开通产品,未开通时显式设 DASHSCOPE_TEXT_MODEL=qwen-plus 兜底。
+ */
+export const TEXT_MODEL = process.env.DASHSCOPE_TEXT_MODEL?.trim() || "ZHIPU/GLM-5.3-Flash";
 
 /**
  * 构造 provider。每次调用都重新读环境变量 —— 配置缺失应在使用点报错,

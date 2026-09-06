@@ -14,7 +14,7 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { cosineDistance } from "drizzle-orm";
 import { isAiConfigured } from "@/lib/ai/provider";
 import { getDb, isDatabaseConfigured } from "@/lib/db/client";
-import { memories } from "@/lib/db/schema";
+import { knowledgeBases, memories } from "@/lib/db/schema";
 import { loadRecentMessages } from "./conversations";
 import { embedText } from "./embedding";
 import { getProfile } from "./profile";
@@ -24,6 +24,9 @@ export const RECENT_MESSAGE_LIMIT = 20;
 
 /** 注入的语义记忆条数上限 —— 不要全量塞上下文(调研结论第 4 点)。 */
 export const RECALL_LIMIT = 8;
+
+/** 知识库段在 instructions 里的字符预算(step2 T4;摘要超长截断护预算)。 */
+const KB_SECTION_BUDGET = 1500;
 
 /** 先按向量相似度取这么多候选,再用综合打分重排。 */
 const CANDIDATE_POOL = 30;
@@ -113,6 +116,37 @@ async function touchMemories(ids: readonly string[]): Promise<void> {
 }
 
 /**
+ * 知识库段(step2 T4):注入全部库的聚合摘要,作为 realtime 模型
+ * 「闲聊直答 / 触发 search_knowledge 检索」的前置判断依据。
+ * 摘要在 finalize 阶段 LLM 生成;instructions 建连定格,库内容更新后
+ * 新会话/重连才生效(不承诺会话中实时)。
+ */
+async function buildKnowledgeSection(userId: string): Promise<string> {
+  const rows = await getDb()
+    .select({ name: knowledgeBases.name, summary: knowledgeBases.summary })
+    .from(knowledgeBases)
+    .where(and(eq(knowledgeBases.userId, userId), sql`${knowledgeBases.summary} is not null`))
+    .orderBy(desc(knowledgeBases.updatedAt));
+
+  const entries = rows
+    .map((row) => `《${row.name}》${(row.summary ?? "").replace(/\s+/g, " ").trim()}`)
+    .filter((entry) => entry.length > "《》".length + 10);
+
+  if (entries.length === 0) return "";
+
+  let digest = entries.join(";");
+  if (digest.length > KB_SECTION_BUDGET) {
+    digest = digest.slice(0, KB_SECTION_BUDGET) + `…(等共 ${entries.length} 个知识库)`;
+  }
+
+  return (
+    `【用户的知识库】用户上传了以下资料:\n${digest}\n` +
+    "当用户的问题可能涉及这些内容时,先调用 search_knowledge 工具检索,再依据检索结果回答" +
+    "(可自然提及来源文件);日常闲聊、问候与情感陪伴直接回应,不要检索。"
+  );
+}
+
+/**
  * 组装注入到 instructions 的记忆上下文段落。
  *
  * 查询报错时返回空字符串 —— 记忆是增强项,失败不能让对话页 500。
@@ -165,6 +199,10 @@ export async function buildMemoryContext(userId: string): Promise<string> {
         "但不要机械复述、不要主动声明\"我记得\"、不要一次全说完。" +
         "若用户否认或纠正了其中某条,以用户当前的说法为准。",
     );
+
+    // 知识库段(step2 T4):无库用户零开销,有库时为检索工具提供触发依据
+    const knowledgeSection = await buildKnowledgeSection(userId);
+    if (knowledgeSection !== "") parts.push(knowledgeSection);
 
     return parts.join("\n\n");
   } catch (error) {

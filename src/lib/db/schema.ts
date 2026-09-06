@@ -22,9 +22,24 @@ import {
   timestamp,
   uuid,
   boolean,
+  varchar,
+  bigint,
+  customType,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { vector } from "drizzle-orm/pg-core";
+
+/**
+ * tsvector 自定义类型(0009 知识库模块)。drizzle 无原生 tsvector —— 但本项目
+ * 对该列只写入原生 SQL(to_tsvector(...)),TS 侧声明仅为让 schema 镜像完整、
+ * 类型检查通过,不做查询构建器层的过滤。
+ */
+const tsvector = customType<{ data: string; driverData: string }>({
+  dataType() {
+    return "tsvector";
+  },
+});
 
 /**
  * 向量维度 1024 —— 百炼 text-embedding-v3 / v4 / qwen3.7-text-embedding 的
@@ -278,6 +293,244 @@ export const inviteCodes = pgTable("invite_codes", {
 });
 
 export type InviteCodeRow = typeof inviteCodes.$inferSelect;
+
+/* ------------------------------------------------------------------ */
+/* 知识库模块(0009_knowledge_base.sql,自 codeweaver 迁移;详见        */
+/* specCoding/知识库模块/step1)                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 知识库。summary 是全部文档内容范围的聚合归纳 —— step2 注入 realtime
+ * instructions,作为"闲聊直答 / 检索知识库"前置判断的依据。
+ */
+export const knowledgeBases = pgTable(
+  "knowledge_bases",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    summary: text("summary"),
+    summaryGeneratedAt: timestamp("summary_generated_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("idx_knowledge_bases_user").on(table.userId)],
+);
+
+/**
+ * 上传文件。content 是 UTF-8 文本缓存(分块/嵌入读库不回源 Blob);
+ * metadata 存六阶段流水线进度 state 与图谱统计;summary 为单文件内容摘要。
+ */
+export const uploadedFiles = pgTable(
+  "uploaded_files",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kbId: uuid("kb_id")
+      .notNull()
+      .references(() => knowledgeBases.id, { onDelete: "cascade" }),
+    fileName: text("file_name").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull().default(0),
+    blobUrl: varchar("blob_url", { length: 1000 }),
+    content: text("content"),
+    /** uploaded | processing | completed | failed(SQL CHECK 约束强制) */
+    status: text("status").notNull().default("uploaded"),
+    summary: text("summary"),
+    metadata: jsonb("metadata").notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("idx_uploaded_files_kb").on(table.kbId)],
+);
+
+/**
+ * 检索分块(父子双轨):parent 供上下文、child 供命中;命中 child 后升 parent。
+ * keywords 列只经原生 SQL 写入/查询(to_tsvector/to_tsquery)。
+ */
+export const documentChunks = pgTable(
+  "document_chunks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    fileId: uuid("file_id")
+      .notNull()
+      .references(() => uploadedFiles.id, { onDelete: "cascade" }),
+    /** parent | child(SQL CHECK 约束强制) */
+    chunkType: text("chunk_type").notNull(),
+    chunkIndex: integer("chunk_index").notNull().default(0),
+    parentChunkId: uuid("parent_chunk_id").references((): AnyPgColumn => documentChunks.id, {
+      onDelete: "cascade",
+    }),
+    chunkText: text("chunk_text").notNull(),
+    embedding: vector("embedding", { dimensions: EMBEDDING_DIMENSIONS }),
+    keywords: tsvector("keywords"),
+    metadata: jsonb("metadata").notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("idx_document_chunks_file").on(table.fileId),
+    index("idx_document_chunks_parent").on(table.parentChunkId),
+    index("idx_document_chunks_embedding_hnsw")
+      .using("hnsw", table.embedding.op("vector_cosine_ops")),
+    index("idx_document_chunks_keywords_gin").using("gin", table.keywords),
+    index("idx_document_chunks_chunk_text_trgm").using(
+      "gin",
+      sql`${table.chunkText} gin_trgm_ops`,
+    ),
+  ],
+);
+
+/** 图谱专用大分块(带卷/章标题,供实体抽取与图谱检索)。 */
+export const graphChunks = pgTable(
+  "graph_chunks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    fileId: uuid("file_id")
+      .notNull()
+      .references(() => uploadedFiles.id, { onDelete: "cascade" }),
+    chunkIndex: integer("chunk_index").notNull().default(0),
+    text: text("text").notNull(),
+    chapterTitle: text("chapter_title"),
+    volumeTitle: text("volume_title"),
+    /** 图谱构建状态机:graph_processed / processing_at / graph_error */
+    metadata: jsonb("metadata").notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("idx_graph_chunks_file").on(table.fileId)],
+);
+
+/** 知识图谱实体。name_embedding 用于跨批次实体合并(余弦相似度)。 */
+export const kgEntities = pgTable(
+  "kg_entities",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kbId: uuid("kb_id")
+      .notNull()
+      .references(() => knowledgeBases.id, { onDelete: "cascade" }),
+    name: varchar("name", { length: 500 }).notNull(),
+    /** person | location | organization | event | concept(约定值) */
+    entityType: varchar("entity_type", { length: 50 }).notNull().default("concept"),
+    description: text("description"),
+    nameEmbedding: vector("name_embedding", { dimensions: EMBEDDING_DIMENSIONS }),
+    nameKeywords: tsvector("name_keywords"),
+    /** aliases 等(跨批次实体合并记录) */
+    metadata: jsonb("metadata").notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("idx_kg_entities_kb").on(table.kbId),
+    index("idx_kg_entities_name_embedding_hnsw")
+      .using("hnsw", table.nameEmbedding.op("vector_cosine_ops")),
+    index("idx_kg_entities_name_keywords_gin").using("gin", table.nameKeywords),
+    index("idx_kg_entities_name_trgm").using("gin", sql`${table.name} gin_trgm_ops`),
+    index("idx_kg_entities_kb_type_lower_name").on(
+      table.kbId,
+      table.entityType,
+      sql`lower(${table.name})`,
+    ),
+  ],
+);
+
+/** 知识图谱关系(有向:source → target)。 */
+export const kgRelations = pgTable(
+  "kg_relations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kbId: uuid("kb_id")
+      .notNull()
+      .references(() => knowledgeBases.id, { onDelete: "cascade" }),
+    relationType: varchar("relation_type", { length: 200 }).notNull(),
+    description: text("description"),
+    sourceEntityId: uuid("source_entity_id")
+      .notNull()
+      .references(() => kgEntities.id, { onDelete: "cascade" }),
+    targetEntityId: uuid("target_entity_id")
+      .notNull()
+      .references(() => kgEntities.id, { onDelete: "cascade" }),
+    /** chunk_id:关系来源图谱块(孤儿清理与块级去重依据) */
+    metadata: jsonb("metadata").notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("idx_kg_relations_kb").on(table.kbId),
+    index("idx_kg_relations_source").on(table.sourceEntityId),
+    index("idx_kg_relations_target").on(table.targetEntityId),
+  ],
+);
+
+/** 实体 ↔ 图谱块多对多。 */
+export const kgEntityChunks = pgTable(
+  "kg_entity_chunks",
+  {
+    entityId: uuid("entity_id")
+      .notNull()
+      .references(() => kgEntities.id, { onDelete: "cascade" }),
+    chunkId: uuid("chunk_id")
+      .notNull()
+      .references(() => graphChunks.id, { onDelete: "cascade" }),
+  },
+  (table) => [index("idx_kg_entity_chunks_chunk").on(table.chunkId)],
+);
+
+export type KnowledgeBaseRow = typeof knowledgeBases.$inferSelect;
+export type UploadedFileRow = typeof uploadedFiles.$inferSelect;
+export type DocumentChunkRow = typeof documentChunks.$inferSelect;
+export type GraphChunkRow = typeof graphChunks.$inferSelect;
+export type KgEntityRow = typeof kgEntities.$inferSelect;
+export type KgRelationRow = typeof kgRelations.$inferSelect;
+
+/* ------------------------------------------------------------------ */
+/* 知识库文本问答线(0010_knowledge_chat.sql,step2 T6)—— 与语音      */
+/* 陪伴线的 conversations/messages 完全独立                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 文本问答会话:绑定一个知识库(删除后 SET NULL,会话保留)。
+ * search_mode 是该会话的检索模式偏好,UI 可切换。
+ */
+export const kbConversations = pgTable(
+  "kb_conversations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    kbId: uuid("kb_id").references(() => knowledgeBases.id, { onDelete: "set null" }),
+    /** hybrid | graph | fast(SQL CHECK 约束强制) */
+    searchMode: text("search_mode").notNull().default("hybrid"),
+    title: text("title").notNull().default(""),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("idx_kb_conversations_user").on(table.userId, table.updatedAt.desc()),
+    index("idx_kb_conversations_kb").on(table.kbId),
+  ],
+);
+
+/**
+ * 文本问答消息。assistant 的 metadata 存引用列表
+ * (Array<{index, fileId, fileName, chunkId}>)与工具轨迹,刷新后还原引用 UI。
+ */
+export const kbMessages = pgTable(
+  "kb_messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => kbConversations.id, { onDelete: "cascade" }),
+    /** user | assistant(SQL CHECK 约束强制) */
+    role: text("role").notNull(),
+    content: text("content").notNull(),
+    metadata: jsonb("metadata").notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("idx_kb_messages_conversation").on(table.conversationId, table.createdAt)],
+);
+
+export type KbConversationRow = typeof kbConversations.$inferSelect;
+export type KbMessageRow = typeof kbMessages.$inferSelect;
 
 export type ConversationRow = typeof conversations.$inferSelect;
 export type MessageRow = typeof messages.$inferSelect;

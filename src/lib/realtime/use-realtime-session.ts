@@ -23,6 +23,11 @@ import { PROSODY_CALIBRATED_VOICE } from "@/lib/persona/voices";
 import { moodFromUserEmotion, prosodyToMood, textMood, type ElfMood, type ProsodySample } from "@/lib/realtime/mood";
 import { parseServerEvent } from "@/lib/realtime/parse-events";
 import {
+  SEARCH_KNOWLEDGE_REALTIME_TOOL,
+  SEARCH_KNOWLEDGE_TOOL_NAME,
+  parseSearchKnowledgeArguments,
+} from "@/lib/knowledge/search/tool-shared";
+import {
   DASHSCOPE_SESSION_DEFAULTS,
   REMEMBER_FACT_TOOL,
   REMEMBER_FACT_TOOL_NAME,
@@ -31,8 +36,12 @@ import {
 
 const SESSION_SIGNALING_PATH = "/api/realtime/session";
 
-/** 单会话内模型调用工具的次数上限(spec T2 的防滥用要求)。 */
+/** 单会话内 remember_fact 的次数上限(spec T2 的防滥用要求)。 */
 const MAX_TOOL_CALLS_PER_SESSION = 10;
+/** 单会话内 search_knowledge 的次数上限(step2 T2:护成本,hybrid 单次含多路调用+重排)。 */
+const MAX_SEARCH_CALLS_PER_SESSION = 8;
+/** 工具触发到显示检索态的防抖(复用 thinking 闸门的节奏;fast 模式 <2s 完成则全程不显示)。 */
+const SEARCH_DISPLAY_DELAY_MS = 2000;
 
 /* ------- thinking 导演(2026-09-01 拍板):防思考态闪烁 ------- */
 /** 用户说完后超过此时长仍无回复,才显示 thinking(之前保持聆听态)。 */
@@ -135,6 +144,8 @@ interface RealtimeState {
   /** 远端语音韵律启发式的最近结论(采样级更新,仅说话期有意义) */
   prosodyMood: ElfMood | null;
   history: TranscriptEntry[];
+  /** 知识库检索工具是否在途(step2 T3;UI 据此把 thinking 文案换成"正在查知识库") */
+  searching: boolean;
 }
 
 type RealtimeAction =
@@ -154,7 +165,10 @@ type RealtimeAction =
   /** 用户打断:丢弃尚未播完的助手字幕残留 */
   | { kind: "barge-in" }
   /** 转写落库后把 messages.id 挂到对应字幕条目上(供 👍/👎 反馈定位) */
-  | { kind: "attach-db-id"; entryId: string; messageId: string };
+  | { kind: "attach-db-id"; entryId: string; messageId: string }
+  /** 知识库检索工具开始/结束(step2 T3) */
+  | { kind: "search-start" }
+  | { kind: "search-end" };
 
 let entrySeq = 0;
 
@@ -177,6 +191,7 @@ function initialState(history: TranscriptEntry[]): RealtimeState {
     userEmotion: null,
     prosodyMood: null,
     history,
+    searching: false,
   };
 }
 
@@ -236,6 +251,10 @@ function reducer(state: RealtimeState, action: RealtimeAction): RealtimeState {
       history[index] = { ...history[index], dbId: action.messageId };
       return { ...state, history };
     }
+    case "search-start":
+      return state.searching ? state : { ...state, searching: true };
+    case "search-end":
+      return state.searching ? { ...state, searching: false } : state;
   }
 }
 
@@ -294,6 +313,15 @@ export interface UseRealtimeSessionOptions {
    * 不传 = 不注册该工具(对话照常,记忆只走会话后的批量抽取兜底)。
    */
   onRememberFact?: (fact: { content: string; category: string; importance: number }) => void;
+  /**
+   * 模型调用 `search_knowledge` 工具时的检索执行体(step2 T3)。
+   * 返回压缩后的检索上下文,经 function_call_output 回传给模型。
+   * 不传 = 不注册该工具(精灵不感知知识库,语音对话照常)。
+   */
+  onSearchKnowledge?: (input: {
+    query: string;
+    mode?: "hybrid" | "fast" | "graph";
+  }) => Promise<{ context: string }>;
 }
 
 export interface UseRealtimeSessionResult extends RealtimeState {
@@ -339,8 +367,14 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
     ticks: number;
   } | null>(null);
   const optionsRef = useRef(options);
-  /** 本会话已处理的工具调用次数(防滥用上限);每次 start 重置 */
+  /** 本会话已处理的 remember_fact 次数(防滥用上限);每次 start 重置 */
   const toolCallsRef = useRef(0);
+  /** 本会话已处理的 search_knowledge 次数;每次 start 重置 */
+  const searchCallsRef = useRef(0);
+  /** 检索在途(已收到 function_call、最终回答未开始):期间 response.done 不回 live 态 */
+  const searchPendingRef = useRef(false);
+  /** 检索态显示防抖计时(到点仍在检索才切 thinking 展示,防 fast 模式闪烁) */
+  const searchDisplayTimerRef = useRef<number | null>(null);
 
   /* ------- thinking 导演的运行件(全部 ref,事件回调内读写) -------
    * 生命周期:speech_stopped 起 2s 计时 → 到点仍无回复则显示 thinking 并
@@ -362,6 +396,14 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
     if (releaseTimerRef.current !== null) {
       window.clearTimeout(releaseTimerRef.current);
       releaseTimerRef.current = null;
+    }
+  }, []);
+
+  /** 清掉检索态的显示防抖计时(用户开口/检索结束/会话停止)。 */
+  const clearSearchDisplayTimer = useCallback(() => {
+    if (searchDisplayTimerRef.current !== null) {
+      window.clearTimeout(searchDisplayTimerRef.current);
+      searchDisplayTimerRef.current = null;
     }
   }, []);
 
@@ -444,10 +486,15 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
     // 分两次发是为了隔离风险:这条请求若被服务端以"不支持 tools"拒绝,
     // 上面的核心配置已经生效,对话照常进行,只是没有实时记忆标记 ——
     // 记忆还有会话后的批量抽取兜底。合在一条里发则一次失败全盘皆输。
-    if (ok && opts.onRememberFact !== undefined) {
+    const opts2 = optionsRef.current;
+    const tools = [
+      ...(opts2.onRememberFact !== undefined ? [REMEMBER_FACT_TOOL] : []),
+      ...(opts2.onSearchKnowledge !== undefined ? [SEARCH_KNOWLEDGE_REALTIME_TOOL] : []),
+    ];
+    if (ok && tools.length > 0) {
       sendClientEvent({
         type: "session.update",
-        session: { tools: [REMEMBER_FACT_TOOL] },
+        session: { tools },
       });
     }
   }, [sendClientEvent]);
@@ -514,6 +561,7 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
           }
           playerRef.current?.interrupt();
           abortHold(); // 用户重新说话 = 打断:丢弃 thinking 计时与 held 缓存
+          clearSearchDisplayTimer(); // 检索等待期开口:不再切检索态(检索继续,答案稍后到)
           dispatch({ kind: "barge-in" });
           dispatch({ kind: "user-emotion", emotion: null }); // 新话语,情绪待 ASR 增量刷新
           dispatch({ kind: "status", status: "user-talking" });
@@ -554,6 +602,12 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
           break;
         case "response.created":
           inFlightResponseRef.current = true;
+          if (searchPendingRef.current) {
+            // 检索后模型开始正式作答:检索在途结束,UI 退出检索态
+            searchPendingRef.current = false;
+            clearSearchDisplayTimer();
+            dispatch({ kind: "search-end" });
+          }
           if (prosodyRef.current !== null) prosodyRef.current.samples = []; // 新话语重新累积韵律
           dispatch({ kind: "response-arm" });
           if (heldRef.current) {
@@ -602,7 +656,73 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
           break;
         }
         case "response.function_call_arguments.done": {
-          if (event.name !== REMEMBER_FACT_TOOL_NAME || event.call_id === undefined) break;
+          if (event.call_id === undefined) break;
+
+          if (event.name === SEARCH_KNOWLEDGE_TOOL_NAME) {
+            // 知识检索工具(step2 T3):与 remember_fact 相反,模型在等**真实结果**,
+            // 必须检索完才能回执 —— 等待期模型静默,UI 用检索态承接。
+            const callId = event.call_id;
+            searchCallsRef.current += 1;
+            if (searchCallsRef.current > MAX_SEARCH_CALLS_PER_SESSION) {
+              sendClientEvent({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: callId,
+                  output: JSON.stringify({ context: "已达本次会话的检索次数上限,请基于已有知识回答并如实告知用户。" }),
+                },
+              });
+              sendClientEvent({ type: "response.create" });
+              break;
+            }
+
+            const args = parseSearchKnowledgeArguments(event.arguments);
+            if (args === null) {
+              // 参数不合法也要回执,否则模型无限等待
+              sendClientEvent({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: callId,
+                  output: JSON.stringify({ context: "检索参数无效,请基于已有知识回答。" }),
+                },
+              });
+              sendClientEvent({ type: "response.create" });
+              break;
+            }
+
+            searchPendingRef.current = true;
+            dispatch({ kind: "search-start" });
+            // 防抖显示:2s 后仍在检索才切 thinking(fast 模式秒回则全程不闪检索态)
+            clearSearchDisplayTimer();
+            searchDisplayTimerRef.current = window.setTimeout(() => {
+              searchDisplayTimerRef.current = null;
+              if (searchPendingRef.current) dispatch({ kind: "status", status: "thinking" });
+            }, SEARCH_DISPLAY_DELAY_MS);
+
+            void (async () => {
+              let context: string;
+              try {
+                const result = await optionsRef.current.onSearchKnowledge?.(args);
+                context = result?.context ?? "知识库检索暂不可用,请基于已有知识回应。";
+              } catch {
+                context = "知识库检索暂时出错,请告知用户稍后再试。";
+              }
+              if (!aliveRef.current) return;
+              sendClientEvent({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: callId,
+                  output: JSON.stringify({ context }),
+                },
+              });
+              sendClientEvent({ type: "response.create" });
+            })();
+            break;
+          }
+
+          if (event.name !== REMEMBER_FACT_TOOL_NAME) break;
 
           // **先回执、再落库**。模型在等 function_call_output,不回就不继续说 ——
           // 用户会听到一段没有尽头的沉默。回执内容固定为 ok,不携带落库结果:
@@ -647,7 +767,7 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
           break;
       }
     },
-    [gateMedia, sendClientEvent, sendSessionUpdate, abortHold, clearThinkTimers, scheduleRelease],
+    [gateMedia, sendClientEvent, sendSessionUpdate, abortHold, clearThinkTimers, clearSearchDisplayTimer, scheduleRelease],
   );
 
   const bindChannel = useCallback(
@@ -697,17 +817,22 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
 
   const stop = useCallback(() => {
     abortHold();
+    clearSearchDisplayTimer();
+    searchPendingRef.current = false;
+    dispatch({ kind: "search-end" });
     teardown();
     dispatch({ kind: "status", status: "idle" });
     dispatch({ kind: "reset-partial" });
     dispatch({ kind: "user-emotion", emotion: null });
     dispatch({ kind: "prosody-mood", mood: null });
-  }, [abortHold, teardown]);
+  }, [abortHold, clearSearchDisplayTimer, teardown]);
 
   const start = useCallback(async () => {
     if (aliveRef.current) return;
     aliveRef.current = true;
     toolCallsRef.current = 0;
+    searchCallsRef.current = 0;
+    searchPendingRef.current = false;
     dispatch({ kind: "clear-error" });
 
     let pc: RTCPeerConnection | null = null;

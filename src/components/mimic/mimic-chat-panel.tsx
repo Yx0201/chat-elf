@@ -38,6 +38,7 @@ import { findPersona, resolvePersona } from "@/lib/persona/resolve";
 import type { PersonaRecord } from "@/lib/persona/types";
 import type { PersonaSettings } from "@/lib/persona/settings";
 import { REMEMBER_FACT_USAGE_HINT, type RealtimeSessionDefaults } from "@/lib/realtime/session-defaults";
+import { searchKnowledgeAction } from "@/lib/knowledge/actions";
 import {
   useRealtimeSession,
   type RealtimeStatus,
@@ -154,6 +155,9 @@ export function MimicChatPanel({
     voice: settings.voice,
     sessionDefaults,
     onRememberFact: handleRememberFact,
+    // 知识库检索工具(step2 T3):realtime 模型自主判断何时查;
+    // 失败降级文案在 action 内部处理,这里只透传
+    onSearchKnowledge: searchKnowledgeAction,
   });
   const { attachMessageId } = session;
 
@@ -354,7 +358,9 @@ export function MimicChatPanel({
               restGaze={CHAT_REST_GAZE}
               className="h-[200px] w-[200px] lg:h-[280px] lg:w-[280px]"
             />
-            <p className="text-base font-medium text-[#37352E] lg:text-lg">{STATUS_TEXT[session.status]}</p>
+            <p className="text-base font-medium text-[#37352E] lg:text-lg">
+              {session.searching && session.status === "thinking" ? "正在查知识库…" : STATUS_TEXT[session.status]}
+            </p>
 
             {/* 字幕矩形(2026-08-31 拍板):固定高度、内容底部对齐 —— 新字幕把旧字幕
                 一点点往上顶,越过上缘即被裁掉;上缘再叠一层渐变淡出 + 渐进模糊,
@@ -556,6 +562,7 @@ export function MimicChatPanel({
             <SheetLink href="/persona" label="人格库 · 看 TA 与其它人格" />
             <SheetLink href="/memory" label="TA 记得什么 · 记忆" />
             <SheetLink href="/history" label="历史会话" />
+            <SheetLink href="/knowledge" label="知识库 · 上传资料让 TA 引用" />
 
             <div className="mt-2 flex flex-col gap-1 rounded-xl border border-[#E5E3DF] p-4 opacity-55">
               <p className="text-sm font-medium text-[#37352E]">偏好与安全</p>

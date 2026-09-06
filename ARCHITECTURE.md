@@ -19,8 +19,9 @@
 | 状态管理 | **zustand**（按需引入）。**尚未引入**：当前人格/音色设置仅 3 个字段、组件树 2 层，用 `useSyncExternalStore` + props 足够；待人格入库、需多处共享人格列表时再评估 |
 | 类型/数据校验 | **zod** |
 | Agent 框架 | **Vercel AI SDK**（仅服务端文本型 agentic 任务；实时语音链路不使用，见下文） |
+| 知识库底座 | **@node-rs/jieba**（应用层中文分词，替代 pgjieba——Neon 不支持自定义 C 扩展；`serverExternalPackages` 排除打包）+ **@vercel/blob**（上传原文二进制，private store + 签名 URL 下载）+ DashScope `qwen3.7-text-rerank`（原生 rerank 端点，失败降级融合原序）。2026-09-06 知识库模块 step1 引入，迁移自自研 codeweaver 项目（specCoding/知识库模块/） |
 
-分工原则：能用 Next.js 解决的（页面、Route Handler、Server Actions）不用额外服务；只有 Next.js 做不了的能力（持久化、鉴权、文件存储）才落到外部服务。当前持久化为 PostgreSQL（本地 → Neon），数据库访问一律走 Next.js 服务端 —— **读走 Server Component 直取，写走 Server Action，不建 REST 数据路由**。Route Handler 例外清单（2026-09-01 修订）：①实时信令转发 `/api/realtime/session`；②音色试听合成 `/api/voice-preview`；③Better Auth 端点 `/api/auth/[...all]`（注册/登录/退出的 cookie 设置与 CSRF 防护依赖标准 HTTP 流程，属框架标配）。
+分工原则：能用 Next.js 解决的（页面、Route Handler、Server Actions）不用额外服务；只有 Next.js 做不了的能力（持久化、鉴权、文件存储）才落到外部服务。当前持久化为 PostgreSQL（本地 → Neon），数据库访问一律走 Next.js 服务端 —— **读走 Server Component 直取，写走 Server Action，不建 REST 数据路由**。Route Handler 例外清单（2026-09-06 知识库模块 step2 修订），**准入规则：流式响应、大文件上传、长任务分批推进三类才允许 Route Handler，其余一律 RSC/Action**：①实时信令转发 `/api/realtime/session`；②音色试听合成 `/api/voice-preview`；③Better Auth 端点 `/api/auth/[...all]`（cookie 设置与 CSRF 防护依赖标准 HTTP 流程，属框架标配）；④知识库上传 `/api/knowledge/[kbId]/upload`（multipart 大文件）；⑤处理流水线推进 `/api/knowledge/[kbId]/files/[fileId]/process`（长任务，每请求推进一个有界批次）；⑥原文下载 `/api/files/[fileId]`（签名 URL 302 重定向）；⑦文本问答流式 `/api/kb-chat`（UIMessage 流）。
 
 依赖引入原则【已确认】：需要组件库、状态管理、类型校验时，首选分别是 shadcn/ui、zustand、zod，不得引入同类替代品；且一律按需下载——写到哪个功能才装哪个依赖，不做预装囤积。
 
@@ -205,8 +206,12 @@ BETTER_AUTH_URL=http://localhost:3000  # 部署 Vercel 后改为线上域名
 
 # —— 可选覆盖（均有代码内默认值）——
 # DASHSCOPE_COMPATIBLE_BASE_URL=           # AI SDK 兼容端点，默认 A 写法见「Agentic 层架构」
-# DASHSCOPE_TEXT_MODEL=qwen-plus           # 记忆抽取 / 摘要用文本模型
+# DASHSCOPE_TEXT_MODEL=ZHIPU/GLM-5.3-Flash # 记忆/知识库文本模型（2026-09-06 起默认 GLM-5.3-Flash，
+#                                          #   需百炼控制台开通产品;开通前显式设回 qwen-plus）
 # DASHSCOPE_EMBEDDING_MODEL=text-embedding-v3  # 文本向量模型；换模型若改 dimensions 需同步改 memories.embedding 列宽
+# DASHSCOPE_RERANK_MODEL=qwen3.7-text-rerank  # 知识库重排（DashScope 原生端点,非兼容模式）
+BLOB_READ_WRITE_TOKEN=               # Vercel Blob（知识库原文存储;Dashboard 建 store 后 vercel env pull）
+# KB_* 前缀:知识库摄取/检索可调参数（批量/Top-K/RRF/并发/阈值,默认值见 .env.example）
 ```
 
 ## 目标目录结构【2026-08-29 已实施 · 2026-09-01 用户体系更新】
@@ -229,14 +234,23 @@ src/
     persona/[personaId]/page.tsx    # 编辑人格（companion 命中则锁定只读）
     memory/page.tsx                 # 「TA 记得你」记忆可视化页（notify 球 + 画像卡）
     language/page.tsx               # 拟态球交互语言说明页（登录页入口）
+    knowledge/page.tsx              # 知识库列表（建库/删除;设置抽屉入口）
+    knowledge/[kbId]/page.tsx       # KB 详情（统计/摘要/上传/六阶段进度/检索测试/问TA入口）
+    knowledge/[kbId]/files/[fileId]/page.tsx  # 文件详情（摘要/分块预览/下载/删除/重试）
+    knowledge/[kbId]/chat/page.tsx  # 文本问答（useChat + streamdown + [N] 引用角标,step2 T7）
     mimic.css                       # 拟态球设计 token 与动画
     api/
       auth/[...all]/route.ts        # Better Auth HTTP 端点（注册/登录/退出,cookie+CSRF）
       realtime/session/route.ts     # WebRTC SDP 信令转发（核心，Node runtime）
       voice-preview/route.ts        # 音色试听 TTS 合成
+      knowledge/[kbId]/upload/route.ts        # 知识库上传（multipart→Blob+DB）
+      knowledge/[kbId]/files/[fileId]/process/route.ts  # 摄取流水线逐批推进（GET 进度/POST 推进）
+      files/[fileId]/route.ts       # 原文下载（签名 URL 302）
+      kb-chat/route.ts              # 文本问答流式（streamText+search_knowledge 工具+isStepCount(6)）
   components/
     chat/
       message-feedback.tsx          # 👍/👎 埋点（对话面板复用）
+    knowledge/                      # 知识库 UI（新建对话框/详情面板/检索测试/文件操作）
     mimic/
       ball/                         # 拟态球：ball-context（常驻层）/ mimic-ball（rAF 驱动器）/ engine（bloub 移植）
       login-form.tsx                # 登录表单（注册/登录一体,authClient + resolveLandingAction）
@@ -288,7 +302,19 @@ src/
       provider.ts                   # 双通道解析（服务端专用）
       session-defaults.ts           # 两通道差异化的 session.update 参数
       mood.ts                       # 三层语气合成
+    knowledge/                      # 知识库底座（自 codeweaver 迁移,2026-09-06）
+      config.ts                     # KB_* 摄取/检索参数（env 可覆盖）
+      tokenizer.ts                  # 应用层 jieba 分词 + tsquery 构建
+      chunking.ts                   # 小说结构感知父子双轨分块
+      blob.ts                       # Vercel Blob 封装（private + 签名 URL）
+      sql.ts                        # 原生 SQL 助手 + PG 数组参数（drizzle 数组会展开,须走 ARRAY[] 构造）
+      repository.ts                 # 知识库/文件读写（归属过滤）
+      actions.ts                    # Server Actions（建删库/删文件/重试/检索测试/语音检索 searchKnowledgeAction）
+      ingestion/                    # 六阶段摄取管线 + 图谱构建 + 摘要生成
+      search/                       # 三路检索 + RRF + rerank + context 构建 + search_knowledge 工具定义（tool-shared 双端安全）
+      chat/                         # 文本问答线数据层（kb_conversations/kb_messages）
 db/migrations/                      # 建表 SQL（手写、幂等，迁移的真相源）
+scripts/kb-e2e-seed.mjs             # E2E 种子（免 Blob 走真实管线,开发验证用）
 ```
 
 数据模型（迁移文件全部幂等可重复执行）：
@@ -316,10 +342,19 @@ db/migrations/                      # 建表 SQL（手写、幂等，迁移的�
   - `companions(id uuid pk, user_id text UNIQUE → "user".id CASCADE, persona_id uuid → personas.id SET NULL, persona_name text, voice text, hatched_at)` —— 用户 1:1 陪伴精灵，`UNIQUE` 是"一次性孵化"的数据库级保证；`persona_name`/`voice` 是定格快照。
 - `0008_invite_codes.sql`（2026-09-01，内测准入）
   - `invite_codes(code text pk, note, active bool, created_at)`，迁移内预置内测主码。**注册邀请码在 auth 实例的 `hooks.before` 里强制校验**（只拦 `/sign-up/email`，比对 active 的码，不一致 throw `INVITE_CODE_INVALID`）—— 校验必须在服务端链路，`/api/auth` 是公开端点，只在前端拦会被直接调 API 绕过；登录不校验。停用码：`UPDATE invite_codes SET active=false`。
+- `0009_knowledge_base.sql`（2026-09-06，知识库模块 step1，自 codeweaver 迁移）
+  - 7 张表：`knowledge_bases(user_id CASCADE, name, description, summary, summary_generated_at)`；`uploaded_files(kb_id CASCADE, file_name, size_bytes, blob_url, content 文本缓存, status ∈ {uploaded,processing,completed,failed}, summary, metadata jsonb 流水线进度)`；`document_chunks(file_id CASCADE, chunk_type ∈ {parent,child}, chunk_index, parent_chunk_id 自引用 CASCADE, chunk_text, embedding vector(1024), keywords tsvector, metadata)`；`graph_chunks(file_id, text, chapter_title, volume_title, metadata 图谱构建状态机)`；`kg_entities(kb_id, name, entity_type 约定 5 值, description, name_embedding vector(1024), name_keywords, metadata 别名)`；`kg_relations(kb_id, relation_type, description, source/target_entity_id CASCADE, metadata chunk_id 溯源)`；`kg_entity_chunks(entity_id, chunk_id) 复合主键`。
+  - 索引：chunks 的 HNSW(embedding)/GIN(keywords)/GIN trigram(chunk_text)；实体的 HNSW/GIN/trigram/复合查找索引 —— 与 memories 的 HNSW 同构。
+  - tsvector/向量列只经原生 SQL 读写（`to_tsvector('simple', 应用层分词)`），schema.ts 镜像仅保类型完整。
+- `0010_knowledge_chat.sql`（2026-09-06，知识库模块 step2 T6）
+  - `kb_conversations(user_id CASCADE, kb_id SET NULL, search_mode ∈ {hybrid,graph,fast} DEFAULT hybrid, title)` —— 文本问答会话，与语音陪伴线的 conversations 完全独立。
+  - `kb_messages(conversation_id CASCADE, role ∈ {user,assistant}, content, metadata jsonb)` —— assistant 的 metadata 存 `[N]` 引用列表（Array<{index,fileId,fileName,chunkId}>），刷新后引用 UI 从这里还原。
 
-- 需启用 `vector` 扩展（本机 Homebrew PG 17.5 自带 0.8.0）。
+- 需启用 `vector` 与 `pg_trgm` 扩展（0009 内含 `CREATE EXTENSION IF NOT EXISTS`；本机 Homebrew PG 自带）。
 
 realtime 会话是易失的，文本转写在每轮响应定稿后异步入库，这是历史留存与跨设备恢复的唯一可靠途径。
+
+**知识检索的注入点（2026-09-06 step2）**：①语音线——`buildMemoryContext` 注入【用户的知识库】段（KB 聚合摘要，≤1500 字符，建连定格、库更新后新会话生效），realtime 会话注册 `search_knowledge` 工具（模型自主触发，单会话 8 次上限，检索经 Server Action 执行、结果以 function_call_output 回传）；②文本线——`/api/kb-chat` 的 streamText + 同一工具（isStepCount(6) 护栏），跨调用全局引用编号经 messageMetadata 下发并落 `kb_messages.metadata`。
 
 ## 编码约定【已确认】
 
