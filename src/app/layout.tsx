@@ -1,5 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { Analytics } from "@vercel/analytics/next";
+import { SpeedInsights } from "@vercel/speed-insights/next";
 import { BallProvider } from "@/components/mimic/ball/ball-context";
 import "./globals.css";
 import "./mimic.css";
@@ -51,6 +53,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           />
           <BallProvider>{children}</BallProvider>
         </div>
+        {/* Vercel 数据监控:访问量(Web Analytics)与性能指标(Speed Insights)。
+            官方组件,Vercel 部署自动上报,本地 dev 不采集;无需环境变量。 */}
+        <Analytics />
+        <SpeedInsights />
       </body>
     </html>
   );
