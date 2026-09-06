@@ -15,7 +15,9 @@ export const SEARCH_KNOWLEDGE_TOOL_NAME = "search_knowledge";
 export const SEARCH_KNOWLEDGE_DESCRIPTION =
   "检索用户的知识库资料。当用户的问题涉及知识库涵盖的主题(小说情节、文档内容、资料细节、" +
   "用户上传资料里的任何信息)时调用;日常闲聊、问候、情感陪伴、知识库范围外的问题不要调用。" +
-  "刚才已经检索到并回答过的内容不必重复检索。";
+  "刚才已经检索到并回答过的内容不必重复检索。" +
+  "query 只传核心检索词(人名/物品/事件 + 关键词),不要把解释性文字(如某字的写法说明)放进 query。" +
+  "语音转写常有同音字误差:首次检索无果或明显答非所问时,结合上下文换同音/近义写法再检索一次。";
 
 export type SearchKnowledgeMode = "hybrid" | "fast" | "graph";
 
@@ -83,8 +85,11 @@ export const WEB_SEARCH_TOOL_NAME = "web_search";
 export const WEB_SEARCH_DESCRIPTION =
   "联网搜索最新或公共信息。当用户问时效性内容(今天/最近/最新/现在,如天气、新闻、价格、" +
   "版本发布)或对话上下文与用户资料都没有的公域知识(公众人物、地理常识、技术文档)时调用。" +
-  "用户自己上传资料里的内容不要用本工具,应使用 search_knowledge;模型已知的稳定常识和" +
-  "闲聊陪伴不要调用;刚才已经搜过且上下文已有的信息不重复搜。";
+  "用户明确要求\u201c搜索/查一下/联网\u201d时**必须**调用本工具,即使你自认知道答案" +
+  "(你的知识可能过时);重大事件、灾害、伤亡统计等事实类问题也必须先搜索核实再回答。" +
+  "复杂事件可拆成多个角度(时间线/伤亡/救援/影响)分别搜索后综合。" +
+  "用户自己上传资料里的内容不要用本工具,应使用 search_knowledge;闲聊陪伴不要调用;" +
+  "刚才已经搜过且上下文已有的信息不重复搜。";
 
 /** realtime session.update 注册用(与 SEARCH_KNOWLEDGE_REALTIME_TOOL 同形状)。 */
 export const WEB_SEARCH_REALTIME_TOOL: {
@@ -123,4 +128,11 @@ export function parseWebSearchArguments(raw: string | undefined): { query: strin
       ? ((parsed as Record<string, unknown>).query as string).trim().slice(0, 200)
       : "";
   return query === "" ? null : { query };
+}
+
+/** 语音字幕条目上展示的联网来源(webSearchAction → hook → 面板)。 */
+export interface TranscriptWebSource {
+  title: string;
+  siteName: string;
+  url: string;
 }

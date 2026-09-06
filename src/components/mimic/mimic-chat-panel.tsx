@@ -39,6 +39,7 @@ import type { PersonaRecord } from "@/lib/persona/types";
 import type { PersonaSettings } from "@/lib/persona/settings";
 import { REMEMBER_FACT_USAGE_HINT, type RealtimeSessionDefaults } from "@/lib/realtime/session-defaults";
 import { searchKnowledgeAction, webSearchAction } from "@/lib/knowledge/actions";
+import type { TranscriptWebSource } from "@/lib/knowledge/search/tool-shared";
 import {
   useRealtimeSession,
   type RealtimeStatus,
@@ -89,6 +90,8 @@ interface CaptionEntry {
   text: string;
   dbId?: string;
   feedback?: 1 | -1 | null;
+  /** 该条回答依据的联网来源(web_search 触发时) */
+  sources?: TranscriptWebSource[];
 }
 
 export function MimicChatPanel({
@@ -278,6 +281,7 @@ export function MimicChatPanel({
   }, [session.history, session.userPartial, session.assistantPartial]);
 
   const captions: CaptionEntry[] = session.history.map((entry) => ({
+    ...(entry.sources === undefined ? {} : { sources: entry.sources }),
     id: entry.id,
     role: entry.role,
     text: entry.text,
@@ -429,6 +433,26 @@ export function MimicChatPanel({
                 >
                   {entry.text}
                 </span>
+                {entry.role === "assistant" && entry.sources !== undefined && entry.sources.length > 0 ? (
+                  <div className="max-w-[85%] rounded-lg bg-[#F6F5F4] px-3 py-2">
+                    <p className="text-[11px] font-medium text-[#787671]">联网来源</p>
+                    <ul className="mt-1 flex flex-col">
+                      {entry.sources.map((source) => (
+                        <li key={source.url} className="text-[11px] leading-5">
+                          🌐{" "}
+                          <a
+                            href={source.url}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            className="text-[#787671] underline decoration-[#C9C6BF] underline-offset-2 hover:text-[#5645D4]"
+                          >
+                            {source.siteName} · {source.title}
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
                 {/* 反馈只对 TA 的回复开放,且要等这条落库拿到 message id 之后(step2 T4) */}
                 {entry.role === "assistant" && entry.dbId !== undefined ? (
                   <MessageFeedback messageId={entry.dbId} initialScore={entry.feedback ?? null} />

@@ -10,6 +10,7 @@
 
 import { revalidatePath } from "next/cache";
 import { requireActionUserId } from "@/lib/auth/session";
+import type { TranscriptWebSource } from "./search/tool-shared";
 import {
   createKnowledgeBase,
   deleteFile,
@@ -116,8 +117,11 @@ export async function searchKnowledgeAction(input: {
 /**
  * 语音线的联网搜索执行体(step3):realtime 模型 web_search 工具的回调。
  * 失败语义与 searchKnowledgeAction 一致 —— **永不抛错**,返回可朗读降级。
+ * sources 透传给字幕 UI 展示(用户实测反馈:语音线看不到来源)。
  */
-export async function webSearchAction(input: { query: string }): Promise<{ context: string }> {
+export async function webSearchAction(input: {
+  query: string;
+}): Promise<{ context: string; sources?: TranscriptWebSource[] }> {
   const userId = await requireActionUserId();
   if (userId === null) {
     return { context: "联网搜索暂不可用,请基于已有知识自然回应。" };
@@ -134,8 +138,12 @@ export async function webSearchAction(input: { query: string }): Promise<{ conte
     if (result.answer === "" && result.sources.length === 0) {
       return { context: "联网没有搜到相关内容,请如实告知用户并基于已有知识回应。" };
     }
-    const sourceLines = result.sources
-      .slice(0, 5)
+    const sources = result.sources.slice(0, 5).map((source) => ({
+      title: source.title,
+      siteName: source.siteName,
+      url: source.url,
+    }));
+    const sourceLines = sources
       .map((source) => `- ${source.title}(${source.siteName})`)
       .join("\n");
     return {
@@ -143,6 +151,7 @@ export async function webSearchAction(input: { query: string }): Promise<{ conte
         `以下是联网检索摘要:\n\n${result.answer}` +
         (sourceLines === "" ? "" : `\n\n来源:\n${sourceLines}`) +
         `\n\n请只依据以上摘要回答,摘要里没有的日期/数字不要自行补充;回答时至少口头提及一个来源站点。`,
+      ...(sources.length > 0 ? { sources } : {}),
     };
   } catch (error) {
     console.error("[knowledge] 语音联网搜索失败(降级):", error instanceof Error ? error.message : error);

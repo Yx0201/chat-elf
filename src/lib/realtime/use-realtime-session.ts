@@ -30,6 +30,7 @@ import {
   WEB_SEARCH_TOOL_NAME,
   parseSearchKnowledgeArguments,
   parseWebSearchArguments,
+  type TranscriptWebSource,
 } from "@/lib/knowledge/search/tool-shared";
 import {
   DASHSCOPE_SESSION_DEFAULTS,
@@ -120,6 +121,11 @@ export interface TranscriptEntry {
   dbId?: string;
   /** 该条已收到的反馈(👍 = 1 / 👎 = -1);历史条目从库里带出 */
   feedback?: 1 | -1 | null;
+  /**
+   * 该条回答依据的联网来源(web_search 触发时挂载,字幕下方展示)。
+   * 仅会话内存中保留,不随消息落库(来源时效性短,回看时可能已失效)。
+   */
+  sources?: TranscriptWebSource[];
 }
 
 /** 播种用的历史条目：来自数据库，id 由 Hook 生成。 */
@@ -167,7 +173,7 @@ type RealtimeAction =
   /** 新一轮响应开始:复位定稿标记与残留流 */
   | { kind: "response-arm" }
   /** 一轮响应收尾(每次响应只采纳第一个到达的收尾事件) */
-  | { kind: "assistant-settle"; fallback: string }
+  | { kind: "assistant-settle"; fallback: string; sources?: TranscriptWebSource[] }
   /** 用户打断:丢弃尚未播完的助手字幕残留 */
   | { kind: "barge-in" }
   /** 转写落库后把 messages.id 挂到对应字幕条目上(供 👍/👎 反馈定位) */
@@ -182,9 +188,18 @@ function pushEntry(
   history: TranscriptEntry[],
   role: TranscriptEntry["role"],
   text: string,
+  sources?: TranscriptWebSource[],
 ): TranscriptEntry[] {
   entrySeq += 1;
-  return [...history, { id: `${role[0]}-${entrySeq}`, role, text }];
+  return [
+    ...history,
+    {
+      id: `${role[0]}-${entrySeq}`,
+      role,
+      text,
+      ...(sources !== undefined && sources.length > 0 ? { sources } : {}),
+    },
+  ];
 }
 
 function initialState(history: TranscriptEntry[]): RealtimeState {
@@ -243,7 +258,8 @@ function reducer(state: RealtimeState, action: RealtimeAction): RealtimeState {
       const text = state.assistantPartial.trim() !== ""
         ? state.assistantPartial.trim()
         : action.fallback.trim();
-      const history = text === "" ? state.history : pushEntry(state.history, "assistant", text);
+      const history =
+        text === "" ? state.history : pushEntry(state.history, "assistant", text, action.sources);
       return { ...state, assistantPartial: "", assistantSettled: true, history };
     }
     case "barge-in":
@@ -332,7 +348,9 @@ export interface UseRealtimeSessionOptions {
    * 模型调用 `web_search` 工具时的联网检索执行体(step3,原生 API 执行端)。
    * 返回摘要+来源的可朗读上下文;不传 = 不注册该工具(模型不联网)。
    */
-  onWebSearch?: (input: { query: string }) => Promise<{ context: string }>;
+  onWebSearch?: (input: {
+    query: string;
+  }) => Promise<{ context: string; sources?: TranscriptWebSource[] }>;
 }
 
 export interface UseRealtimeSessionResult extends RealtimeState {
@@ -384,6 +402,8 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
   const searchCallsRef = useRef(0);
   /** 本会话已处理的 web_search 次数;每次 start 重置 */
   const webSearchCallsRef = useRef(0);
+  /** 检索到的联网来源,挂到下一条落定的 assistant 字幕上(取后即清) */
+  const pendingSourcesRef = useRef<TranscriptWebSource[]>([]);
   /** 检索在途(已收到 function_call、最终回答未开始):期间 response.done 不回 live 态 */
   const searchPendingRef = useRef(false);
   /** 检索态显示防抖计时(到点仍在检索才切 thinking 展示,防 fast 模式闪烁) */
@@ -428,6 +448,7 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
     replyArrivedRef.current = false;
     heldDeltasRef.current = "";
     heldSettleRef.current = null;
+    pendingSourcesRef.current = [];
   }, [clearThinkTimers]);
 
   /** 释放闸门:冲刷缓冲的助手字幕、恢复播放、切入说话态。 */
@@ -441,7 +462,13 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
       heldDeltasRef.current = "";
     }
     if (heldSettleRef.current !== null) {
-      dispatch({ kind: "assistant-settle", fallback: heldSettleRef.current.fallback });
+      const settleSources = pendingSourcesRef.current;
+      pendingSourcesRef.current = [];
+      dispatch({
+        kind: "assistant-settle",
+        fallback: heldSettleRef.current.fallback,
+        ...(settleSources.length > 0 ? { sources: settleSources } : {}),
+      });
       heldSettleRef.current = null;
     }
     playerRef.current?.resume();
@@ -483,7 +510,13 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
         : {};
     // 当前时间注入(2026-09-06 实锤:模型没有"今天几号"的概念,不注入则
     // "明天天气"类问题的相对时间全靠猜)。每次连麦取设备时钟,长会话跨日也新鲜。
-    const timedInstructions = `${opts.instructions ?? DEFAULT_INSTRUCTIONS}\n\n[当前时间] ${currentDateLabel()}(用户当地)。涉及日期时间的回答以此为准;用户说的相对时间(今天/明天/最近)先换算成具体日期再检索或回答。`;
+    const timedInstructions =
+      `${opts.instructions ?? DEFAULT_INSTRUCTIONS}\n\n[当前时间] ${currentDateLabel()}(用户当地)。` +
+      "涉及日期时间的回答以此为准;用户说的相对时间(今天/明天/最近)先换算成具体日期再检索或回答。" +
+      (opts.onWebSearch !== undefined
+        ? "\n用户要求\u201c搜索/查一下/联网\u201d时必须调用 web_search 工具,即使你自认知道答案" +
+          "(你的知识可能过时);灾害、伤亡等重大事实必须搜索核实后再回答,并口头说明信息来源站点。"
+        : "");
     const ok = sendClientEvent({
       type: "session.update",
       session: {
@@ -653,7 +686,15 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
             scheduleRelease();
             break;
           }
-          dispatch({ kind: "assistant-settle", fallback: event.transcript ?? "" });
+          {
+            const settleSources = pendingSourcesRef.current;
+            pendingSourcesRef.current = [];
+            dispatch({
+              kind: "assistant-settle",
+              fallback: event.transcript ?? "",
+              ...(settleSources.length > 0 ? { sources: settleSources } : {}),
+            });
+          }
           break;
         case "response.done": {
           inFlightResponseRef.current = false;
@@ -668,7 +709,15 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
             scheduleRelease();
             break;
           }
-          dispatch({ kind: "assistant-settle", fallback: fallback ?? "" });
+          {
+            const settleSources = pendingSourcesRef.current;
+            pendingSourcesRef.current = [];
+            dispatch({
+              kind: "assistant-settle",
+              fallback: fallback ?? "",
+              ...(settleSources.length > 0 ? { sources: settleSources } : {}),
+            });
+          }
           dispatch({ kind: "status", status: "live" });
           break;
         }
@@ -784,6 +833,12 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
               try {
                 const result = await optionsRef.current.onWebSearch?.(webArgs);
                 context = result?.context ?? "联网搜索暂不可用,请基于已有知识回应。";
+                if (result?.sources !== undefined && result.sources.length > 0) {
+                  pendingSourcesRef.current = [
+                    ...pendingSourcesRef.current,
+                    ...result.sources,
+                  ].slice(-8);
+                }
               } catch {
                 context = "联网搜索暂时出错,请告知用户稍后再试。";
               }
@@ -912,6 +967,7 @@ export function useRealtimeSession(options: UseRealtimeSessionOptions = {}): Use
     toolCallsRef.current = 0;
     searchCallsRef.current = 0;
     webSearchCallsRef.current = 0;
+    pendingSourcesRef.current = [];
     searchPendingRef.current = false;
     dispatch({ kind: "clear-error" });
 

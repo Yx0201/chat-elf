@@ -123,10 +123,33 @@ async function touchMemories(ids: readonly string[]): Promise<void> {
  */
 async function buildKnowledgeSection(userId: string): Promise<string> {
   const rows = await getDb()
-    .select({ name: knowledgeBases.name, summary: knowledgeBases.summary })
+    .select({ id: knowledgeBases.id, name: knowledgeBases.name, summary: knowledgeBases.summary })
     .from(knowledgeBases)
     .where(and(eq(knowledgeBases.userId, userId), sql`${knowledgeBases.summary} is not null`))
     .orderBy(desc(knowledgeBases.updatedAt));
+
+  // 专有名词锚点(语音实测反馈:ASR 同音字误差让"抱珠/抱竹/抱猪"类检索失准)。
+  // 按块关联数(≈出现频次)取每库高频实体,给模型对照纠错的正确写法。
+  let entityDigest = "";
+  try {
+    const entityRows = await getDb().execute(sql`
+      SELECT e.name AS name, COUNT(ec.chunk_id)::int AS links
+      FROM kg_entities e
+      LEFT JOIN kg_entity_chunks ec ON ec.entity_id = e.id
+      WHERE e.kb_id IN (${sql.join(
+        rows.map((row) => sql`${row.id}::uuid`),
+        sql`, `,
+      )})
+      GROUP BY e.id, e.name
+      ORDER BY links DESC
+      LIMIT 60`);
+    const names = (entityRows.rows as Array<{ name: string }>).map((row) => row.name);
+    if (names.length > 0) {
+      entityDigest = names.join("、").slice(0, 400);
+    }
+  } catch (error) {
+    console.error("[memory] 实体名单查询失败(降级跳过):", error instanceof Error ? error.message : error);
+  }
 
   const entries = rows
     .map((row) => `《${row.name}》${(row.summary ?? "").replace(/\s+/g, " ").trim()}`)
@@ -141,6 +164,7 @@ async function buildKnowledgeSection(userId: string): Promise<string> {
 
   return (
     `【用户的知识库】用户上传了以下资料:\n${digest}\n` +
+    (entityDigest === "" ? "" : `资料中的高频专有名词(检索时语音转写的同音字可对照此名单纠正):${entityDigest}\n`) +
     "当用户的问题可能涉及这些内容时,先调用 search_knowledge 工具检索,再依据检索结果回答" +
     "(可自然提及来源文件);日常闲聊、问候与情感陪伴直接回应,不要检索。"
   );
