@@ -300,7 +300,11 @@ async function runEmbeddingStage(
 
   if (rows.length > 0) {
     // 失败直接抛错 → 本阶段 failed,可 retry;不吞错以免剩余计数永远清不了零。
+    const embedStart = Date.now();
     const embeddings = await embedTexts(rows.map((row) => row.chunk_text));
+    console.log(
+      `[knowledge][trace] 嵌入批次 ${rows.length}条 耗时=${Date.now() - embedStart}ms`,
+    );
 
     // 单往返批量回填:UPDATE ... FROM (VALUES ...) 按 id 匹配向量。
     const values = rows.map(
@@ -373,6 +377,10 @@ async function runGraphSplitStage(
       graphBuiltChunks: 0,
     },
   };
+  console.log(
+    `[knowledge][trace] graphSplit 完成 图谱块=${graphChunkDescriptors.length}` +
+      `(检索父块=${nextState.counts.retrievalParentChunks}/子块=${nextState.counts.retrievalChildChunks})`,
+  );
   nextState = moveToStage(nextState, "graphBuild");
   nextState = updateStepState(nextState, "graphBuild", {
     status: "running",
@@ -462,8 +470,13 @@ async function runGraphBuildStage(
   );
 
   // 串行写库:并发写入会产生重复实体(解析与合并不原子)。
+  // 写库段逐块计时(trace 分析用:提取是并行、写库是串行,两者的耗时分布
+  // 决定加并发还有没有收益)。
+  const writeStart = Date.now();
+  const writeMsPerChunk: number[] = [];
   for (let i = 0; i < extractedRows.length; i += 1) {
     const { row, extraction } = extractedRows[i];
+    const chunkWriteStart = Date.now();
     try {
       if (extraction) {
         await writeKnowledgeGraphChunkIngestion({ kbId, graphChunkId: row.id, extraction });
@@ -479,6 +492,16 @@ async function runGraphBuildStage(
       SET metadata = (COALESCE(metadata, '{}'::jsonb)
           || jsonb_build_object('graph_processed', true, 'graph_error', ${extractedRows[i].graphError}::text)) - 'processing_at'
       WHERE id = ${row.id}::uuid`);
+    writeMsPerChunk.push(Date.now() - chunkWriteStart);
+  }
+  const writeMs = Date.now() - writeStart;
+  const slowestWrite = writeMsPerChunk.length > 0 ? Math.max(...writeMsPerChunk) : 0;
+  if (slowestWrite > 3000) {
+    console.warn(`[knowledge][trace] 慢写库块 ${slowestWrite}ms(串行段的拖累点)`);
+  }
+  const slowestExtract = extractedRows.reduce((max, r) => Math.max(max, r.ms), 0);
+  if (slowestExtract > 12000) {
+    console.warn(`[knowledge][trace] 慢LLM调用 ${slowestExtract}ms`);
   }
 
   const batchMs = Date.now() - batchStart;
@@ -500,9 +523,13 @@ async function runGraphBuildStage(
       AND COALESCE(metadata ->> 'graph_processed', 'false') <> 'true'`);
   const remaining = remainingRows[0]?.count ?? 0;
 
+  const perChunkAvgMs = rows.length > 0 ? Math.round(batchMs / rows.length) : 0;
+  const etaSec = remaining > 0 && rows.length > 0 ? Math.round((remaining * batchMs) / rows.length / 1000) : 0;
   console.log(
-    `[knowledge] graphBuild 批次完成 file=${fileId} 成功=${batchSuccess} 失败=${batchFail}` +
-      ` 耗时=${batchMs}ms 限流=${rateLimitHits} 下一并发=${nextConcurrency} 剩余=${remaining}`,
+    `[knowledge][trace] graphBuild 批次完成 file=${fileId.slice(0, 8)} 本批=${rows.length} 成功=${batchSuccess} 失败=${batchFail}` +
+      ` 墙钟=${batchMs}ms[提取段最慢${slowestExtract}ms ‖ 写库段${writeMs}ms(最慢${slowestWrite}ms)]` +
+      ` 均耗/块=${perChunkAvgMs}ms 限流=${rateLimitHits} 下一并发=${nextConcurrency} 剩余=${remaining}` +
+      (remaining > 0 ? ` 预计还需~${Math.floor(etaSec / 60)}分${etaSec % 60}秒` : ""),
   );
 
   const newStats: GraphBuildStats = {

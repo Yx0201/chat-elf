@@ -12,7 +12,7 @@
 import { generateObject, generateText } from "ai";
 import { APICallError } from "ai";
 import { z } from "zod";
-import { getDashScopeProvider, isAiConfigured, TEXT_MODEL } from "@/lib/ai/provider";
+import { getDashScopeProvider, isAiConfigured, TEXT_MODEL, textModelProviderOptions } from "@/lib/ai/provider";
 
 /** 实体类型的 5 个规范值(约定,不建 DB enum)。 */
 type EntityType = "person" | "location" | "organization" | "event" | "concept";
@@ -147,19 +147,26 @@ export async function extractEntitiesAndRelations(chunkText: string): Promise<Ex
   }
 
   let result: { entities: ExtractedEntity[]; relations: ExtractedRelation[] };
+  const traceStart = Date.now();
   try {
     const response = await generateObject({
       model: getDashScopeProvider().chatModel(TEXT_MODEL),
       schema: ExtractionSchema,
       system: GRAPH_EXTRACT_SYSTEM,
       prompt: `请从下面这段小说文本中抽取知识图谱实体和关系。\n\n文本:\n${chunkText}`,
-      // GLM-5.3-Flash 是强制思考模型(不可关,只可调档,实测 low 档在 DashScope
-      // 返回空,故用默认档):思考 + 结构化输出共用额度,放宽防截断
+      // 若模型支持思考(GLM/部分 qwen),思考 + 结构化输出共用额度,放宽防截断
       maxOutputTokens: 4000,
+      providerOptions: textModelProviderOptions(),
     });
     result = response.object;
+    console.log(
+      `[knowledge][trace] LLM图谱抽取 model=${TEXT_MODEL} 耗时=${Date.now() - traceStart}ms`,
+    );
   } catch (error) {
-    if (isRateLimitError(error)) rateLimitHits += 1;
+    if (isRateLimitError(error)) {
+      rateLimitHits += 1;
+      console.warn("[knowledge][trace] LLM图谱抽取 429 限流(AIMD 将降并发)");
+    }
     throw new Error(`图谱抽取失败: ${extractErrorMessage(error)}`);
   }
 
@@ -199,13 +206,18 @@ function sanitize(value: string | undefined, maxLength: number): string {
  */
 export async function extractQueryEntities(query: string): Promise<string[]> {
   if (!isAiConfigured()) return [];
+  const traceStart = Date.now();
   try {
     const response = await generateText({
       model: getDashScopeProvider().chatModel(TEXT_MODEL),
       system: QUERY_ENTITY_SYSTEM,
       prompt: `查询:${query}\n\n请提取关键实体:`,
       maxOutputTokens: 256,
+      providerOptions: textModelProviderOptions(),
     });
+    console.log(
+      `[knowledge][trace] LLM查询实体 model=${TEXT_MODEL} 耗时=${Date.now() - traceStart}ms 命中=${response.text.trim().split("\n").filter(Boolean).length}`,
+    );
     return response.text
       .split("\n")
       .map((line) => line.replace(/^\d+[.、)\s]*/, "").trim())

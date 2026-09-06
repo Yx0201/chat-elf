@@ -11,7 +11,7 @@ import { generateObject } from "ai";
 import { and, desc, eq, gt, sql } from "drizzle-orm";
 import { cosineDistance } from "drizzle-orm";
 import { z } from "zod";
-import { getDashScopeProvider, isAiConfigured, TEXT_MODEL } from "@/lib/ai/provider";
+import { getDashScopeProvider, isAiConfigured, TEXT_MODEL, textModelProviderOptions } from "@/lib/ai/provider";
 import { getDb, isDatabaseConfigured } from "@/lib/db/client";
 import { memories } from "@/lib/db/schema";
 import { loadTranscript } from "./conversations";
@@ -172,6 +172,7 @@ export async function extractMemories(userId: string, conversationId: string): P
       schema: ExtractionSchema,
       system: EXTRACTION_SYSTEM,
       prompt: text,
+      providerOptions: textModelProviderOptions(),
     });
     candidates = result.object.memories;
   } catch (error) {

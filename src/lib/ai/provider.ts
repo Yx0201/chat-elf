@@ -58,11 +58,25 @@ export function getEmbeddingChannel(): {
 }
 
 /**
- * 文本模型(记忆抽取 / 会话摘要 / 知识库图谱抽取与摘要)。
- * 2026-09-06 起默认 ZHIPU/GLM-5.3-Flash(用户拍板);该模型需在百炼控制台
- * 开通产品,未开通时显式设 DASHSCOPE_TEXT_MODEL=qwen-plus 兜底。
+ * 文本模型(记忆抽取 / 画像 / 知识库图谱抽取与摘要 / 文本问答)。
+ * 2026-09-06 由 ZHIPU/GLM-5.3-Flash 切换为 qwen3.7-flash 并设为默认:
+ * GLM 强制思考(单次 3-8s)+ 200RPM 限流,图谱抽取一部 2.5MB 小说要一小时+;
+ * qwen3.7-flash 非思考 0.6-1.5s、30000RPM、输入0.2/输出0.8元,同小说 14 分钟
+ * 且抽取质量不降(1073 实体/4950 关系验证)。
  */
-export const TEXT_MODEL = process.env.DASHSCOPE_TEXT_MODEL?.trim() || "ZHIPU/GLM-5.3-Flash";
+export const TEXT_MODEL = process.env.DASHSCOPE_TEXT_MODEL?.trim() || "qwen3.7-flash";
+
+/**
+ * TEXT_MODEL 调用的统一 providerOptions(2026-09-06):
+ * qwen3 系默认开思考(实测 qwen3.7-flash 返回 reasoning_content),结构化抽取/
+ * 摘要场景不需要,关掉可把单次调用从 2-8s 压到亚秒级;GLM 不接受该参数
+ * (会报"始终思考"),非 qwen3 模型返回空对象跳过。
+ */
+export function textModelProviderOptions(): Record<string, Record<string, boolean>> {
+  return TEXT_MODEL.toLowerCase().includes("qwen3")
+    ? { dashscope: { enable_thinking: false } }
+    : {};
+}
 
 /**
  * 构造 provider。每次调用都重新读环境变量 —— 配置缺失应在使用点报错,

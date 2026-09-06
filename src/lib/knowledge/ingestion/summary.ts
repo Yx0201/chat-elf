@@ -16,7 +16,7 @@
 import { generateObject, generateText } from "ai";
 import { eq, sql } from "drizzle-orm";
 import { z } from "zod";
-import { getDashScopeProvider, isAiConfigured, TEXT_MODEL } from "@/lib/ai/provider";
+import { getDashScopeProvider, isAiConfigured, TEXT_MODEL, textModelProviderOptions } from "@/lib/ai/provider";
 import { getDb } from "@/lib/db/client";
 import { knowledgeBases, uploadedFiles } from "@/lib/db/schema";
 import { buildNovelGraphChunks } from "@/lib/knowledge/chunking";
@@ -77,6 +77,7 @@ export async function generateFileSummary(fileId: string, fileName: string, cont
     model: getDashScopeProvider().chatModel(TEXT_MODEL),
     schema: FileSummarySchema,
     maxOutputTokens: 4000,
+    providerOptions: textModelProviderOptions(),
     system:
       "你是文档内容归纳器。根据给定的文档结构清单与首尾节选,归纳这份资料的内容范围,以 JSON 对象返回。" +
       "summary 用中文客观描述这份资料讲了什么、覆盖哪些内容,不超过 200 字;" +
@@ -124,6 +125,7 @@ export async function rebuildKnowledgeBaseSummary(kbId: string): Promise<void> {
         "保留每个文档的主题与内容范围(文件名可简化),直接输出摘要正文,不要解释。",
       prompt: digest,
       maxOutputTokens: 1200,
+      providerOptions: textModelProviderOptions(),
     });
     const text = compressed.text.trim();
     if (text.length > 0) digest = text;

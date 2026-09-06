@@ -18,7 +18,7 @@
 import { generateObject } from "ai";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
-import { getDashScopeProvider, isAiConfigured, TEXT_MODEL } from "@/lib/ai/provider";
+import { getDashScopeProvider, isAiConfigured, TEXT_MODEL, textModelProviderOptions } from "@/lib/ai/provider";
 import { getDb, isDatabaseConfigured } from "@/lib/db/client";
 import { memories, userProfile } from "@/lib/db/schema";
 
@@ -154,6 +154,7 @@ export async function refreshProfile(userId: string): Promise<string | null> {
       schema: ProfileSchema,
       system: PROFILE_SYSTEM,
       prompt: source,
+      providerOptions: textModelProviderOptions(),
     });
 
     const summary = result.object.summary.trim().slice(0, 1000);

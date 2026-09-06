@@ -98,6 +98,10 @@ async function resolveEntityIds(
   entities: ExtractedEntity[],
 ): Promise<Map<string, string>> {
   const idMap = new Map<string, string>();
+  const traceStart = Date.now();
+  let embedMs = 0;
+  let createdCount = 0;
+  let mergedCount = 0;
 
   const items = entities
     .map((e) => ({
@@ -112,7 +116,9 @@ async function resolveEntityIds(
   const lowerNameSet = new Set(lowerNames);
 
   // Step 1:全部实体名一次嵌入(替代 N 次调用)。
+  const embedStart = Date.now();
   const embeddings = await embedTexts(items.map((it) => it.name));
+  embedMs = Date.now() - embedStart;
 
   // Step 2:精确名/别名一次批量匹配(数组参数化,无字符串拼接)。
   const exactRows = await queryRows<ExactMatchRow>(sql`
@@ -213,6 +219,7 @@ async function resolveEntityIds(
 
   // Step 5:真新实体一次多行 INSERT,再一次批量 UPDATE 回填向量/关键词。
   if (toCreate.length > 0) {
+    createdCount = toCreate.length;
     const insValues = sql.join(
       toCreate.map((c) => sql`(${crypto.randomUUID()}::uuid, ${kbId}::uuid, ${c.name}, ${c.type})`),
       sql`, `,
@@ -236,6 +243,12 @@ async function resolveEntityIds(
       WHERE e.id = v.id`);
   }
 
+  mergedCount = toMerge.length;
+
+  console.log(
+    `[knowledge][trace] 实体解析 实体=${items.length} 耗时=${Date.now() - traceStart}ms` +
+      `(名嵌入${embedMs}ms/新建${createdCount}/合并${mergedCount})`,
+  );
   return idMap;
 }
 

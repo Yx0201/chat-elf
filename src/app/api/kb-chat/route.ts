@@ -19,7 +19,7 @@ import {
   type UIMessage,
 } from "ai";
 import { getSessionUserId } from "@/lib/auth/session";
-import { getDashScopeProvider, isAiConfigured, TEXT_MODEL } from "@/lib/ai/provider";
+import { getDashScopeProvider, isAiConfigured, TEXT_MODEL, textModelProviderOptions } from "@/lib/ai/provider";
 import { getKnowledgeBase, isValidKbId } from "@/lib/knowledge/repository";
 import { defineSearchKnowledgeTool } from "@/lib/knowledge/search/tool";
 import { buildSearchContext, TEXT_CHAT_BUDGET } from "@/lib/knowledge/search/context-builder";
@@ -148,6 +148,7 @@ export async function POST(req: Request) {
         ],
         tools: { searchKnowledge: searchTool },
         stopWhen: isStepCount(6),
+        providerOptions: textModelProviderOptions(),
         onError: (error) => {
           console.error("[kb-chat] 流式生成错误:", error instanceof Error ? error.message : error);
         },
